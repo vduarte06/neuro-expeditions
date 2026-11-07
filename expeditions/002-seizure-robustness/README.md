@@ -20,6 +20,15 @@ detectors, and does that impact differ between a classical method and a deep lea
 **Study type.** Experimental, quantitative, secondary public data, paired design: each recording is its own
 control (clean vs perturbed).
 
+**Inclusion criteria (baseline cohort, "good patients").**
+- **Temporal seizure localization:** 13 of the 14 patients are temporal, so this makes the cohort clinically
+  homogeneous. Only PN10 (frontal, bilateral FBTC) is excluded by it.
+- **At least 2 seizures:** a baseline needs more than one event per patient to see variation between patients.
+
+The runs started on 2026-11-07 use an earlier working list (`GOOD_PATIENTS` in `run_perturbations.py`, chosen from
+eventNet's first baseline before these criteria were written down). Every perturbation test is also run on all 14
+patients. Details per test: [TESTS.md](TESTS.md).
+
 ## Setup
 | | |
 |---|---|

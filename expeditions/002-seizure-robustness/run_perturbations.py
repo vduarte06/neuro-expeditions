@@ -2,7 +2,8 @@
 """Run technical error perturbation experiments on eventNet across the Good Patient Subset.
 
 Usage (assumes poetry shell inside expeditions/002-seizure-robustness):
-    python run_perturbations.py
+    python run_perturbations.py                    # good-patient subset -> results/perturbations/good_patients/
+    python run_perturbations.py --cohort all       # all 14 patients     -> results/perturbations/all_patients/
     python run_perturbations.py --variations mains_global_50uV,impedance_single_20uV
     python run_perturbations.py --list
 """
@@ -35,7 +36,9 @@ CACHE_DIR = DATA_DIR / "cache" / "002-seizure-robustness" / "perturbations"
 CLEAN_CACHE_DIR = DATA_DIR / "cache" / "002-seizure-robustness" / "clean" / "eventnet"
 RESULTS_DIR = Path(__file__).resolve().parent / "results" / "perturbations"
 
-# The 9 patients in the clean good subset (85.7% clean recall, 0.76 F1)
+# Baseline cohort ("good patients"). Inclusion criteria (README / TESTS.md): temporal seizure localization and at
+# least 2 seizures. This list is the earlier working list, chosen from eventNet's first clean baseline (24/28 seizures
+# detected) before the criteria were written down; it is used by run_extended_tests.py and audit_event_masking.py too.
 GOOD_PATIENTS = ["PN00", "PN01", "PN05", "PN09", "PN12", "PN13", "PN14", "PN16", "PN17"]
 
 SZCORE_PARAMS = scoring.EventScoring.Parameters(
@@ -76,14 +79,21 @@ def main() -> None:
         description="Run perturbation experiments on eventNet for the Good Patient Subset."
     )
     parser.add_argument(
+        "--cohort",
+        choices=["good", "all"],
+        default="good",
+        help="good: the 9 GOOD_PATIENTS (default); all: all 14 Siena patients. Results go to "
+             "results/perturbations/<cohort>_patients/.",
+    )
+    parser.add_argument(
         "--variations",
         default="",
         help="Comma-separated list of variations to evaluate (default: all 19 in catalog).",
     )
     parser.add_argument(
         "--patients",
-        default=",".join(GOOD_PATIENTS),
-        help=f"Comma-separated patient list (default: {','.join(GOOD_PATIENTS)}).",
+        default="",
+        help="Comma-separated patient list; overrides --cohort (results go to results/perturbations/custom_patients/).",
     )
     parser.add_argument(
         "--list", "-l",
@@ -103,7 +113,12 @@ def main() -> None:
             print(f"  • {v['name']:<28} : {v['description']}")
         return
 
-    target_patients = [p.strip() for p in args.patients.split(",") if p.strip()]
+    if args.patients:
+        target_patients = [p.strip() for p in args.patients.split(",") if p.strip()]
+        results_dir = RESULTS_DIR / "custom_patients"
+    else:
+        target_patients = GOOD_PATIENTS if args.cohort == "good" else siena.SUBJECTS
+        results_dir = RESULTS_DIR / f"{args.cohort}_patients"
     if args.variations:
         target_variations = [v.strip() for v in args.variations.split(",") if v.strip()]
     else:
@@ -119,10 +134,10 @@ def main() -> None:
     print(f" Cohort           : {len(target_patients)} patients ({len(recordings)} recordings)")
     print(f" Variations       : {len(target_variations)} conditions")
     print(f" Cache Directory  : {CACHE_DIR}")
-    print(f" Results Directory: {RESULTS_DIR}")
+    print(f" Results Directory: {results_dir}")
     print("=" * 80, flush=True)
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. Load eventNet model
@@ -277,14 +292,14 @@ def main() -> None:
 
         # Periodically save intermediate summary CSV
         summary_df = pd.DataFrame(summary_records)
-        summary_df.to_csv(RESULTS_DIR / "summary_by_variation.csv", index=False)
+        summary_df.to_csv(results_dir / "summary_by_variation.csv", index=False)
 
     # 4. Final summary and reporting
     summary_df = pd.DataFrame(summary_records).round(4)
-    summary_df.to_csv(RESULTS_DIR / "summary_by_variation.csv", index=False)
+    summary_df.to_csv(results_dir / "summary_by_variation.csv", index=False)
 
     rec_df = pd.DataFrame(all_recording_rows).round(4)
-    rec_df.to_csv(RESULTS_DIR / "metrics_by_recording.csv", index=False)
+    rec_df.to_csv(results_dir / "metrics_by_recording.csv", index=False)
 
     print("=" * 80)
     print(" ALL PERTURBATIONS COMPLETE — Summary Benchmark Table")
@@ -292,7 +307,7 @@ def main() -> None:
     display_cols = ["condition", "recall", "precision", "f1", "fa_per_24h", "delta_recall", "delta_f1", "delta_fa_24h"]
     print(summary_df[display_cols].to_string(index=False))
     print("=" * 80)
-    print(f"Results saved to: {RESULTS_DIR / 'summary_by_variation.csv'}\n")
+    print(f"Results saved to: {results_dir / 'summary_by_variation.csv'}\n")
 
 
 if __name__ == "__main__":

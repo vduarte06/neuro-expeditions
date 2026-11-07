@@ -12,6 +12,10 @@ Preprocessing mirrors the official `run_edf_to_tcp_predictions.py`, but starts f
 perturbed first): 200 Hz, 60 Hz notch, 0.1-70 Hz band-pass, bad-channel detection + interpolation (pyprep),
 TCP bipolar montage, STFT (1 s window), per-time-step normalisation. The 60 Hz notch is the released setting
 (TUSZ is US data), kept as is.
+
+Long recordings are run in overlapping 1 h chunks (CHUNK_SEC / CHUNK_OVERLAP_SEC), events merged across chunks. The
+official script feeds each channel's whole recording to the model as one spectrogram image, which needs ~30 GB
+for a 13.5 h Siena file (PN01-1). Recordings up to 1 h (typical TUSZ file length) are processed unchanged.
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ from neuro_expeditions.models import _msda_pytorch
 REPO = DATA_DIR / "external" / "DINO-EEG"
 WEIGHTS = DATA_DIR / "cache" / "models" / "dinoeeg" / "DINO_EEG.pth"
 THRESHOLD = 0.37  # official default
+CHUNK_SEC = 3600.0
+CHUNK_OVERLAP_SEC = 300.0
 MODERN_TO_OLD = {"T7": "T3", "T8": "T4", "P7": "T5", "P8": "T6"}
 COLUMNS = ["onset_sec", "offset_sec", "duration_sec", "confidence", "label"]
 
@@ -126,8 +132,23 @@ class DinoEEG:
             meta.append({"filename": fn, "duration": duration, "time_dim": int(spec.shape[-1]), "is_background": True})
         return meta
 
-    @torch.no_grad()
     def detect(self, raw: mne.io.Raw, name: str = "rec") -> pd.DataFrame:
+        duration = raw.n_times / raw.info["sfreq"]
+        if duration <= CHUNK_SEC:
+            return self._detect_single(raw, name)
+        step = CHUNK_SEC - CHUNK_OVERLAP_SEC
+        starts = list(np.arange(0.0, duration - CHUNK_SEC, step)) + [duration - CHUNK_SEC]
+        parts = []
+        for t0 in starts:
+            chunk = raw.copy().crop(t0, min(t0 + CHUNK_SEC, raw.times[-1]))
+            df = self._detect_single(chunk, name)
+            del chunk
+            if len(df):
+                parts.append(df.assign(onset_sec=df.onset_sec + t0, offset_sec=df.offset_sec + t0))
+        return _merge_overlapping(parts)
+
+    @torch.no_grad()
+    def _detect_single(self, raw: mne.io.Raw, name: str = "rec") -> pd.DataFrame:
         from datasets import build_dataloader
         from util.misc import collate_fn
 
@@ -151,6 +172,24 @@ class DinoEEG:
         df = pd.DataFrame(rows).rename(columns={"score": "confidence"})
         df["label"] = "seizure"
         return df[COLUMNS].sort_values("onset_sec", ignore_index=True)
+
+
+def _merge_overlapping(parts: list[pd.DataFrame]) -> pd.DataFrame:
+    """Union of overlapping events from different chunks (lowest confidence kept, as in the official merge)."""
+    if not parts:
+        return pd.DataFrame(columns=COLUMNS)
+    events = pd.concat(parts).sort_values("onset_sec").to_dict("records")
+    merged = [events[0]]
+    for ev in events[1:]:
+        last = merged[-1]
+        if ev["onset_sec"] <= last["offset_sec"]:
+            last["offset_sec"] = max(last["offset_sec"], ev["offset_sec"])
+            last["confidence"] = min(last["confidence"], ev["confidence"])
+        else:
+            merged.append(ev)
+    df = pd.DataFrame(merged, columns=COLUMNS)
+    df["duration_sec"] = df.offset_sec - df.onset_sec
+    return df.reset_index(drop=True)
 
 
 _default: DinoEEG | None = None
