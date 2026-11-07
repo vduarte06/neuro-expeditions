@@ -1,0 +1,25 @@
+# Data and caches
+data/
+*.part
+*.tmp
+
+# Python & environments
+__pycache__/
+*.py[cod]
+.venv/
+env/
+venv/
+
+# Jupyter & IDEs
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+
+# Generated experiment results, runs, and logs
+results/
+**/results/
+*.log
+*.npz
+
+
