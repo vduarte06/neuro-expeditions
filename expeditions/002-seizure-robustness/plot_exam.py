@@ -38,8 +38,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+import matplotlib.pyplot as plt
 import mne
 from neuro_expeditions.visualization import (
+    add_second_separators,
+    channel_colors,
+    flip_polarity_for_display,
     format_exam_table,
     format_seconds,
     get_exam_catalog,
@@ -106,9 +110,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--montage", "-m",
-        choices=["referential", "bipolar"],
-        default="referential",
-        help="EEG montage: 'referential' (19 channels 10-20) or 'bipolar' (18 channels double-banana).",
+        choices=["referential", "bipolar", "average"],
+        default="bipolar",
+        help="EEG montage: 'referential' (19 channels 10-20), 'bipolar' (18 channels double-banana), "
+        "or 'average' (19 channels 10-20, common average reference).",
     )
     parser.add_argument(
         "--bipolar",
@@ -137,6 +142,13 @@ def main() -> None:
         type=float,
         default=100.0,
         help="EEG vertical display scaling in µV (default: 100 µV).",
+    )
+    parser.add_argument(
+        "--negative-up",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Clinical display polarity: negative deflections up, so blinks (positive at Fp1/Fp2) point down. "
+        "Display only, the data is not changed. Use --no-negative-up for positive-up (default: on).",
     )
     parser.add_argument(
         "--no-models",
@@ -190,7 +202,13 @@ def main() -> None:
     print(f" File            : {selected['file_name']}")
     print(f" Total Duration  : {selected['duration_str']} ({selected['duration_sec']:.1f} s)")
     print(f" Sampling Rate   : {int(selected['sfreq'])} Hz")
-    print(f" Montage         : {montage.capitalize()} ({'18 bipolar channels' if montage == 'bipolar' else '19 10-20 channels'})")
+    montage_desc = {
+        "bipolar": "18 bipolar channels",
+        "average": "19 channels, common average reference",
+        "referential": "19 10-20 channels",
+    }[montage]
+    print(f" Montage         : {montage.capitalize()} ({montage_desc})")
+    print(f" Polarity        : {'negative up (clinical)' if args.negative_up else 'positive up'}")
     print(f" Ground Truth Sz : {len(seizures)} seizure(s)")
     for idx, sz in enumerate(seizures, start=1):
         print(f"   [{idx}] Onset: {format_seconds(sz['onset'])} ({sz['onset']:.1f}s), Duration: {int(round(sz['duration']))}s")
@@ -223,6 +241,9 @@ def main() -> None:
         montage=montage,
         show_models=not args.no_models,
     )
+    # This script only displays `raw`, so flipping in place is display-only.
+    if args.negative_up:
+        flip_polarity_for_display(raw)
 
     # 6. Plotting
     scale_val = args.scale * 1e-6  # µV to V
@@ -255,10 +276,12 @@ def main() -> None:
         duration=args.duration,
         n_channels=len(raw.ch_names),
         scalings=scalings_dict,
-        title=f"EEG Exam: {exam_id} | {montage.capitalize()} | Seizure @ {format_seconds(seizures[0]['onset']) if seizures else 'None'}",
-        show=True,
-        block=True,
+        color={"eeg": "k", **channel_colors(raw.ch_names)},
+        title=f"EEG Exam: {exam_id} | {montage.capitalize()} | {'Negative up' if args.negative_up else 'Positive up'} | Seizure @ {format_seconds(seizures[0]['onset']) if seizures else 'None'}",
+        show=False,
     )
+    add_second_separators(fig.mne.ax_main)
+    plt.show(block=True)
 
 
 if __name__ == "__main__":

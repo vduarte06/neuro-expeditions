@@ -13,6 +13,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import mne
+from matplotlib.ticker import MaxNLocator, MultipleLocator
 import numpy as np
 import pandas as pd
 
@@ -23,10 +24,71 @@ from neuro_expeditions.datasets import siena
 BIPOLAR_PAIRS = [
     ("Fp1", "F7"), ("F7", "T7"), ("T7", "P7"), ("P7", "O1"),
     ("Fp2", "F8"), ("F8", "T8"), ("T8", "P8"), ("P8", "O2"),
+    ("Fz", "Cz"), ("Cz", "Pz"),
     ("Fp1", "F3"), ("F3", "C3"), ("C3", "P3"), ("P3", "O1"),
     ("Fp2", "F4"), ("F4", "C4"), ("C4", "P4"), ("P4", "O2"),
-    ("Fz", "Cz"), ("Cz", "Pz"),
+   
 ]
+
+# Average-reference montage: left chain, midline, right chain (Siena EDF names, old temporal labels).
+AVERAGE_CHANNELS = [
+    "Fp1", "F3", "C3", "P3", "F7", "T3", "T5", "O1",
+    "Fz", "Cz", "Pz",
+    "Fp2", "F4", "C4", "P4", "F8", "T4", "T6", "O2",
+]  # fmt: skip
+
+
+HEMISPHERE_COLORS = {"left": "#1f4fbf", "right": "#c0392b", "midline": "#1c2833"}
+
+
+def channel_side(ch_name: str) -> str:
+    """'left' (odd 10-20 number), 'right' (even) or 'midline' ('z'), from the first electrode in the name."""
+    electrode = ch_name.split("-")[0].strip()
+    match = re.search(r"(\d+)$", electrode)
+    if match:
+        return "left" if int(match.group(1)) % 2 else "right"
+    return "midline"
+
+
+def channel_colors(ch_names: list[str]) -> dict[str, str]:
+    """Per-channel trace colors: left hemisphere blue, right red, midline dark."""
+    return {ch: HEMISPHERE_COLORS[channel_side(ch)] for ch in ch_names}
+
+
+def add_second_separators(ax: plt.Axes) -> None:
+    """Vertical grid line every second, darker on labelled whole-second ticks. Follows scrolling."""
+    ax.xaxis.set_major_locator(MaxNLocator(nbins="auto", steps=[1, 2, 5, 10], integer=True))
+    ax.xaxis.set_minor_locator(MultipleLocator(1.0))
+    ax.grid(True, which="minor", axis="x", color="#9aa0a6", lw=0.6, alpha=0.6)
+    ax.grid(True, which="major", axis="x", color="#5f6368", lw=0.9, alpha=0.7)
+
+
+def flip_polarity_for_display(raw: mne.io.Raw) -> mne.io.Raw:
+    """Negate the signal IN PLACE so it plots negative-up (clinical EEG convention).
+
+    Display only: call it on a Raw that is used just for plotting, never before analysis or detectors.
+    """
+    raw.apply_function(np.negative, channel_wise=False, verbose="error")
+    return raw
+
+
+def load_average_montage(exam_id_or_path: str | Path) -> mne.io.Raw:
+    """Load AVERAGE_CHANNELS re-referenced to their common average, named '<ch>-avg'."""
+    edf_path = siena.resolve_edf_path(exam_id_or_path)
+    raw = mne.io.read_raw_edf(edf_path, preload=False, verbose="error")
+    by_short = {name.replace("EEG", "").strip().lower(): name for name in raw.ch_names}
+    missing = [c for c in AVERAGE_CHANNELS if c.lower() not in by_short]
+    if missing:
+        raise ValueError(f"{edf_path.name}: missing channels {missing}")
+
+    originals = [by_short[c.lower()] for c in AVERAGE_CHANNELS]
+    raw.pick(originals).load_data(verbose="error")
+    raw.reorder_channels(originals)
+    raw.rename_channels(dict(zip(originals, AVERAGE_CHANNELS)))
+    raw.set_channel_types(dict.fromkeys(raw.ch_names, "eeg"))
+    raw.set_eeg_reference("average", projection=False, verbose="error")
+    raw.rename_channels({c: f"{c}-avg" for c in AVERAGE_CHANNELS})
+    return raw
 
 
 def format_seconds(seconds: float) -> str:
@@ -248,8 +310,12 @@ def load_exam_raw(
                 except Exception:
                     pass
 
-    # Optional bipolar re-referencing
-    if montage.lower() == "bipolar":
+    # Optional re-referencing
+    if montage.lower() == "average":
+        annotations = raw.annotations
+        raw = load_average_montage(exam_id_or_path)
+        raw.set_annotations(annotations)
+    elif montage.lower() == "bipolar":
         anodes = [a for a, _ in BIPOLAR_PAIRS]
         cathodes = [c for _, c in BIPOLAR_PAIRS]
         ch_names = [f"{a}-{c}" for a, c in BIPOLAR_PAIRS]
@@ -338,10 +404,11 @@ def plot_overview(
     med_std = np.median(np.std(win_data_uV, axis=1))
     spacing = max(80.0, float(med_std * 5.0))
 
+    colors = channel_colors(ch_names)
     y_ticks = [(n_ch - 1 - i) * spacing for i in range(n_ch)]
     for i in range(n_ch):
         offset = y_ticks[i]
-        ax_trace.plot(win_times, win_data_uV[i] + offset, color="#1c2833", lw=0.75)
+        ax_trace.plot(win_times, win_data_uV[i] + offset, color=colors[ch_names[i]], lw=0.75)
 
     # Mark seizure span in zoomed trace
     for on, off in seizures:
@@ -352,6 +419,8 @@ def plot_overview(
 
     ax_trace.set_yticks(y_ticks)
     ax_trace.set_yticklabels(ch_names, fontsize=9)
+    for label in ax_trace.get_yticklabels():
+        label.set_color(colors[label.get_text()])
     ax_trace.set_xlim(win_start, win_end)
     ax_trace.set_ylim(-spacing * 0.8, (n_ch) * spacing)
     ax_trace.set_xlabel("Time (seconds)", fontsize=10)
@@ -359,7 +428,7 @@ def plot_overview(
         f"Multi-Channel EEG Trace ({win_start:.1f}s – {win_end:.1f}s | {format_seconds(win_start)} – {format_seconds(win_end)})",
         fontsize=11,
     )
-    ax_trace.grid(True, axis="x", linestyle=":", alpha=0.5)
+    add_second_separators(ax_trace)
 
     handles, labels = ax_trace.get_legend_handles_labels()
     if handles:
