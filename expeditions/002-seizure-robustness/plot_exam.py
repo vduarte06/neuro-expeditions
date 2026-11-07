@@ -25,6 +25,14 @@ Usage (assumes poetry shell inside expeditions/002-seizure-robustness):
 
     # 7. Print list of all exams and exit:
     python plot_exam.py --list
+
+    # 8. View the exam with a simulated technical error (see --list-perturbations):
+    python plot_exam.py PN00-1 --perturb muscle_temporal_100uV
+    python plot_exam.py PN00-1 --perturb disconnected_saturation_F3 --montage referential
+
+    # 9. Clean signal (grey) under the perturbed one; --montage average = what eventNet sees:
+    python plot_exam.py PN00-1 --perturb disconnected_focus_severe --compare
+    python plot_exam.py PN00-1 --perturb disconnected_focus_severe --compare --montage average --save cmp.png
 """
 
 from __future__ import annotations
@@ -51,6 +59,8 @@ from neuro_expeditions.visualization import (
     load_exam_raw,
     plot_overview,
 )
+from neuro_expeditions.datasets import siena
+from neuro_expeditions.perturbations import ALL_VARIATIONS, list_variations, variation_electrodes
 
 
 def parse_time_arg(arg: str | float | None) -> float | None:
@@ -165,8 +175,34 @@ def main() -> None:
         default=None,
         help="Path to save static overview figure (e.g. 'exam_PN00-1.png').",
     )
+    parser.add_argument(
+        "--perturb",
+        choices=list(ALL_VARIATIONS),
+        default=None,
+        metavar="VARIATION",
+        help="Apply a perturbation from the catalog to the referential signal before the montage "
+        "(same as run_perturbations.py). Also overlays cached eventNet detections on the perturbed signal.",
+    )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="With --perturb: static figure with the clean signal in grey under the perturbed one; channels that "
+        "changed get bold labels. Use --montage average to see what eventNet sees.",
+    )
+    parser.add_argument(
+        "--list-perturbations",
+        action="store_true",
+        help="Print available perturbation variations and exit.",
+    )
 
     args = parser.parse_args()
+    if args.compare and not args.perturb:
+        parser.error("--compare needs --perturb <variation>")
+
+    if args.list_perturbations:
+        for v in list_variations():
+            print(f"  {v['name']:<28} [{v['set']}] : {v['description']}")
+        return
 
     # 1. Load catalog
     catalog = get_exam_catalog("siena")
@@ -209,6 +245,10 @@ def main() -> None:
     }[montage]
     print(f" Montage         : {montage.capitalize()} ({montage_desc})")
     print(f" Polarity        : {'negative up (clinical)' if args.negative_up else 'positive up'}")
+    if args.perturb:
+        electrodes = variation_electrodes(args.perturb, exam_id, list(siena.CHANNELS_10_20.values()))
+        print(f" Perturbation    : {args.perturb} ({ALL_VARIATIONS[args.perturb]['desc']})")
+        print(f" Perturbed elec. : {', '.join(electrodes)}")
     print(f" Ground Truth Sz : {len(seizures)} seizure(s)")
     for idx, sz in enumerate(seizures, start=1):
         print(f"   [{idx}] Onset: {format_seconds(sz['onset'])} ({sz['onset']:.1f}s), Duration: {int(round(sz['duration']))}s")
@@ -240,24 +280,32 @@ def main() -> None:
         selected["path"],
         montage=montage,
         show_models=not args.no_models,
+        perturbation=args.perturb,
     )
+    label = f"{exam_id} [{args.perturb}]" if args.perturb else exam_id
+    clean_raw = None
+    if args.compare:
+        clean_raw, _ = load_exam_raw(selected["path"], montage=montage, show_models=False)
     # This script only displays `raw`, so flipping in place is display-only.
     if args.negative_up:
         flip_polarity_for_display(raw)
+        if clean_raw is not None:
+            flip_polarity_for_display(clean_raw)
 
     # 6. Plotting
     scale_val = args.scale * 1e-6  # µV to V
 
-    # If save or static overview requested
-    if args.overview or args.save:
+    # If save or static overview requested (the clean/perturbed comparison is static only)
+    if args.overview or args.save or args.compare:
         plot_overview(
             raw=raw,
             seizures=sz_tuples,
-            exam_id=exam_id,
+            exam_id=label,
             window_start=start_time,
             window_duration=args.duration,
             save_path=args.save,
-            show=args.overview or (args.save is None),
+            show=args.overview or args.compare or (args.save is None),
+            compare_raw=clean_raw,
         )
         return
 
@@ -277,7 +325,7 @@ def main() -> None:
         n_channels=len(raw.ch_names),
         scalings=scalings_dict,
         color={"eeg": "k", **channel_colors(raw.ch_names)},
-        title=f"EEG Exam: {exam_id} | {montage.capitalize()} | {'Negative up' if args.negative_up else 'Positive up'} | Seizure @ {format_seconds(seizures[0]['onset']) if seizures else 'None'}",
+        title=f"EEG Exam: {label} | {montage.capitalize()} | {'Negative up' if args.negative_up else 'Positive up'} | Seizure @ {format_seconds(seizures[0]['onset']) if seizures else 'None'}",
         show=False,
     )
     add_second_separators(fig.mne.ax_main)

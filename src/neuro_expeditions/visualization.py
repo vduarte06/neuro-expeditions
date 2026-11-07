@@ -278,43 +278,75 @@ def interactive_select_exam(
         print(f"Unrecognized exam '{choice}'. Please enter a valid number or ID.")
 
 
+def _average_reference(raw: mne.io.Raw) -> mne.io.Raw:
+    """Re-reference a siena.load_raw() Raw (modern names) to the common average, as load_average_montage does."""
+    modern = [siena.CHANNELS_10_20[c] for c in AVERAGE_CHANNELS]
+    raw = raw.copy().reorder_channels(modern)
+    raw.set_eeg_reference("average", projection=False, verbose="error")
+    raw.rename_channels({m: f"{c}-avg" for m, c in zip(modern, AVERAGE_CHANNELS)})
+    return raw
+
+
+def _add_prediction_annotations(raw: mne.io.Raw, pred_file: Path, label: str) -> None:
+    """Append cached detector events (onset_sec/offset_sec TSV) to raw.annotations, if present."""
+    if not pred_file.is_file():
+        return
+    try:
+        df = pd.read_csv(pred_file, sep="\t")
+    except pd.errors.EmptyDataError:
+        return
+    if len(df) == 0 or "onset_sec" not in df.columns:
+        return
+    raw.set_annotations(
+        raw.annotations
+        + mne.Annotations(
+            onset=df["onset_sec"].tolist(),
+            duration=(df["offset_sec"] - df["onset_sec"]).tolist(),
+            description=[label] * len(df),
+            orig_time=raw.annotations.orig_time,
+        )
+    )
+
+
 def load_exam_raw(
     exam_id_or_path: str | Path,
     montage: str = "referential",
     show_models: bool = True,
     models: list[str] | None = None,
+    perturbation: str | None = None,
 ) -> tuple[mne.io.Raw, list[tuple[float, float]]]:
-    """Load raw EEG with annotations and optional bipolar montage and model predictions."""
+    """Load raw EEG with annotations and optional montage, perturbation and model predictions.
+
+    `perturbation` is a VARIATIONS_CATALOG name. It is applied to the referential signal before
+    re-referencing, the same way run_perturbations.py feeds the detector.
+    """
     raw = siena.load_raw(exam_id_or_path, attach_annotations=True)
     seizures = siena.load_seizures(exam_id_or_path)
+
+    if perturbation:
+        from neuro_expeditions.perturbations import apply_variation
+
+        raw = apply_variation(raw, perturbation)
 
     # Optional model predictions overlay
     if show_models:
         edf_stem = siena.resolve_edf_path(exam_id_or_path).stem
         target_models = models or ["eventnet", "sparcnet", "gotman"]
-        clean_cache = DATA_DIR / "cache" / "002-seizure-robustness" / "clean"
+        cache_root = DATA_DIR / "cache" / "002-seizure-robustness"
 
         for mod in target_models:
-            pred_file = clean_cache / mod / f"{edf_stem}.tsv"
-            if pred_file.is_file():
-                try:
-                    df = pd.read_csv(pred_file, sep="\t")
-                    if len(df) > 0 and "onset_sec" in df.columns:
-                        mod_ann = mne.Annotations(
-                            onset=df["onset_sec"].tolist(),
-                            duration=(df["offset_sec"] - df["onset_sec"]).tolist(),
-                            description=[f"{mod}_pred"] * len(df),
-                            orig_time=raw.annotations.orig_time if raw.annotations else None,
-                        )
-                        raw.set_annotations(raw.annotations + mod_ann)
-                except Exception:
-                    pass
+            _add_prediction_annotations(raw, cache_root / "clean" / mod / f"{edf_stem}.tsv", f"{mod}_pred")
+        if perturbation:
+            # run_perturbations.py caches eventNet detections on the perturbed signal here
+            _add_prediction_annotations(
+                raw,
+                cache_root / "perturbations" / perturbation / f"{edf_stem}.tsv",
+                "eventnet_perturbed_pred",
+            )
 
     # Optional re-referencing
     if montage.lower() == "average":
-        annotations = raw.annotations
-        raw = load_average_montage(exam_id_or_path)
-        raw.set_annotations(annotations)
+        raw = _average_reference(raw)
     elif montage.lower() == "bipolar":
         anodes = [a for a, _ in BIPOLAR_PAIRS]
         cathodes = [c for _, c in BIPOLAR_PAIRS]
@@ -339,8 +371,12 @@ def plot_overview(
     window_duration: float = 30.0,
     save_path: Path | str | None = None,
     show: bool = True,
+    compare_raw: mne.io.Raw | None = None,
 ) -> plt.Figure:
     """Create a high-quality static two-panel overview plot.
+
+    compare_raw: the same exam without the perturbation (same montage and polarity). It is drawn in grey under
+    `raw`, and the channels where the two differ get bold labels.
 
     Panel 1: Global Field Power (GFP) envelope across the entire exam,
              marking seizure intervals and the current window.
@@ -369,6 +405,9 @@ def plot_overview(
     ds_step = max(1, int(sfreq // 4))
     t_ds_min = raw.times[::ds_step] / 60.0
 
+    if compare_raw is not None:
+        gfp_clean = np.sqrt(np.mean(compare_raw.get_data() ** 2, axis=0)) * 1e6
+        ax_env.plot(t_ds_min, gfp_clean[::ds_step], color="#9aa0a6", lw=0.9, label="Global Field Power (clean)")
     ax_env.plot(t_ds_min, gfp_uV[::ds_step], color="#2b5c8f", lw=0.9, label="Global Field Power")
     ax_env.axvspan(win_start / 60.0, win_end / 60.0, color="#f39c12", alpha=0.35, label="Zoomed Window")
 
@@ -406,6 +445,13 @@ def plot_overview(
 
     colors = channel_colors(ch_names)
     y_ticks = [(n_ch - 1 - i) * spacing for i in range(n_ch)]
+    changed: set[str] = set()
+    if compare_raw is not None:
+        clean_uV = compare_raw.get_data()[:, start_idx:end_idx] * 1e6
+        changed = {ch_names[i] for i in np.flatnonzero(np.abs(win_data_uV - clean_uV).max(axis=1) > 1e-3)}
+        for i in range(n_ch):
+            ax_trace.plot(win_times, clean_uV[i] + y_ticks[i], color="#9aa0a6", lw=1.4, alpha=0.9,
+                          label="Clean (no perturbation)" if i == 0 else None)
     for i in range(n_ch):
         offset = y_ticks[i]
         ax_trace.plot(win_times, win_data_uV[i] + offset, color=colors[ch_names[i]], lw=0.75)
@@ -421,6 +467,8 @@ def plot_overview(
     ax_trace.set_yticklabels(ch_names, fontsize=9)
     for label in ax_trace.get_yticklabels():
         label.set_color(colors[label.get_text()])
+        if label.get_text() in changed:
+            label.set_fontweight("bold")
     ax_trace.set_xlim(win_start, win_end)
     ax_trace.set_ylim(-spacing * 0.8, (n_ch) * spacing)
     ax_trace.set_xlabel("Time (seconds)", fontsize=10)

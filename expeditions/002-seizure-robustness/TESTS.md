@@ -94,34 +94,59 @@ python evaluate_detectors.py --score-only             # re-score cached predicti
 
 **Question.** H1: do technical errors reduce performance, and does the drop depend on error type and intensity?
 
-**What is done.** Each of the 19 errors below is added to every recording, eventNet runs on the perturbed signal, and
-the result is compared with the clean result on the same recordings (paired design). 2a uses the 9 good patients,
-where eventNet works, so lost seizures are visible. 2b repeats it on all 14 patients, which shows whether the effect
-depends on how well eventNet handles a patient to begin with. 2b reuses 2a's cached outputs.
+**What is done.** Each of the 15 errors below (5 error types × mild / moderate / severe), plus 4 focus conditions, is added to every recording,
+eventNet runs on the perturbed signal, and the result is compared with the clean result on the same recordings (paired
+design). 2a uses the 9 good patients, where eventNet works, so lost seizures are visible. 2b repeats it on all 14
+patients, which shows whether the effect depends on how well eventNet handles a patient to begin with. 2b reuses 2a's
+cached outputs.
 
 ```bash
 python run_perturbations.py --cohort good    # 2a
 python run_perturbations.py --cohort all     # 2b
-python run_perturbations.py --list           # the 19 conditions
-python run_perturbations.py --variations mains_global_150uV,disconnected_flat_F3
+python run_perturbations.py --list           # the 15 grid + 4 focus conditions (+ extras)
+python run_perturbations.py --variations mains_severe,disconnected_mild
+python plot_exam.py PN00-1 --perturb muscle_severe   # look at one condition on one exam
 ```
 
-| Error | Conditions (name: what is added) |
-|---|---|
-| Mains interference | `mains_single_25uV`, `mains_single_100uV`: 50 Hz sinusoid on F3 · `mains_global_50uV`, `mains_global_150uV`: on all electrodes |
-| High impedance | `impedance_single_20uV`, `impedance_single_60uV`: broadband noise (RMS) on F3 · `impedance_multi_30uV`: on F3, C3, P3 |
-| Disconnected electrode | `disconnected_flat_F3`, `disconnected_flat_F3_T7`: flat line · `disconnected_drift_F3`: large slow drift · `disconnected_saturation_F3`: floating lead picking up clipped mains |
-| Muscle artefact | `muscle_temporal_40uV`, `muscle_temporal_100uV`: 30–100 Hz bursts (6/min, 2.5 s) on F7, T7, F8, T8 |
-| Electrode displacement | `displacement_mild_25pct`, `displacement_moderate_50pct`: F3 mixed with C3 |
-| Perspiration | `perspiration_mild_75uV`, `perspiration_severe_200uV`: < 0.3 Hz slow waves on all electrodes |
-| Gain error | `gain_attenuation_0.5x`, `gain_amplification_2.0x`: F3 scaled |
+| Error | Simulation | Electrodes | `_mild` | `_moderate` | `_severe` |
+|---|---|---|---|---|---|
+| `mains` | 50 Hz sinusoid, peak amplitude, same phase on all affected electrodes | 3 random | 5 µV | 20 µV | 50 µV |
+| `impedance` | Gaussian noise, 0.5–70 Hz; SNR vs the electrode's own 0.5–70 Hz RMS (median over 10 s windows) | 2 random | SNR 10 dB | 5 dB | 0 dB |
+| `disconnected` | flat line (0.5 µV noise floor) | random, nested | 1 | 3 | 5 |
+| `muscle` | 20–100 Hz noise in 2 s bursts (flat top, 0.2 s ramps) covering 10% of the recording, same timing on all 6 electrodes | F7, F8, T7, T8, P7, P8 (old names F7, F8, T3–T6) | 20 µV RMS | 50 µV RMS | 100 µV RMS |
+| `displacement` | `x ← (1−α)·x + α·neighbour` (nearest 10-20 neighbour) | 2 random | α 0.25 | α 0.50 | α 0.75 |
+
+Random electrodes are drawn per recording, seeded from the recording name and the error type: a recording always gets
+the same electrodes, its three severities share them (the 1 / 3 / 5 disconnected electrodes are nested), and the noise
+realization is shared too, so only the intensity changes between severities. The electrodes used are in the
+`electrodes` column of `metrics_by_recording.csv`, which allows splitting results by whether they cover the seizure
+focus. Perturbed signals are not stored; they are regenerated (< 0.5 s per recording) whenever needed.
+
+Random disconnection rarely lands on the seizure side, so 4 targeted conditions are run too (`FOCUS_VARIATIONS`;
+seizure side from `subject_info.csv`):
+
+| Condition | Flat electrodes, left focus | Flat electrodes, right focus |
+|---|---|---|
+| `disconnected_focus_mild` | T7 | T8 |
+| `disconnected_focus_severe` | F7, T7, P7 | F8, T8, P8 |
+| `disconnected_contra_mild` (control) | T8 | T7 |
+| `disconnected_contra_severe` (control) | F8, T8, P8 | F7, T7, P7 |
+
+Random `disconnected_*` gives the typical cost of a failed electrode, `disconnected_focus_*` the worst case, and
+focus vs contra the part due to location. Patients without a left or right focus (PN10) are skipped for these four;
+their deltas are against clean on the same recordings (`n_recordings` column of `summary_by_variation.csv`).
+
+Extra conditions, outside the grid and not run by default (fixed electrodes, name them with `--variations`):
+`disconnected_drift_F3`, `disconnected_saturation_F3`, `perspiration_mild_75uV`, `perspiration_severe_200uV`,
+`gain_attenuation_0.5x`, `gain_amplification_2.0x`, and the earlier muscle definition `muscle_temporal_40uV`,
+`muscle_temporal_100uV` (30–100 Hz, 6 bursts/min of 2.5 s on F7, T7, F8, T8), still used by test 4.
 
 **Results** (`results/perturbations/<good|all>_patients/`)
 
 | File | Content |
 |---|---|
-| `summary_by_variation.csv` | one row per condition (first row = clean): recall, precision, f1, fa_per_24h, tp, fp, and `delta_recall`, `delta_f1`, `delta_fa_24h` vs clean |
-| `metrics_by_recording.csv` | per condition × recording: patient, hours, n_seizures, tp, fp (for paired statistics) |
+| `summary_by_variation.csv` | one row per condition (first row = clean): recall, precision, f1, fa_per_24h, tp, fp, total_seizures, n_recordings, and `delta_recall`, `delta_f1`, `delta_fa_24h` vs clean on the same recordings |
+| `metrics_by_recording.csv` | per condition × recording: patient, hours, n_seizures, tp, fp (for paired statistics), electrodes (perturbed electrodes) |
 | `run.log` | console output |
 
 ## Test 2c · Acquisition errors on all detectors

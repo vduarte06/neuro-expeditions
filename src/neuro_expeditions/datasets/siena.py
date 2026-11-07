@@ -125,6 +125,19 @@ def patient_id(edf: Path) -> str:
     return edf.parent.name
 
 
+def seizure_side(recording: str | Path, root: Path = ROOT) -> str:
+    """Seizure lateralization of a recording's patient from subject_info.csv: 'L', 'R' or 'Bilateral'.
+
+    `recording` is a patient ID ('PN00'), a recording stem ('PN00-1') or an EDF path.
+    """
+    patient = Path(str(recording)).stem.split("-")[0]
+    info = pd.read_csv(root / "subject_info.csv", skipinitialspace=True)
+    sides = dict(zip(info.patient_id, info.lateralization))
+    if patient not in sides:
+        raise KeyError(f"{patient} not in {root / 'subject_info.csv'}")
+    return str(sides[patient]).strip()
+
+
 def resolve_edf_path(subject_or_edf: str | Path, run: int | str | None = None, root: Path = ROOT) -> Path:
     """Resolve an EDF path from a Path, filename, recording stem (e.g. 'PN00-1'), or (subject, run) pair."""
     if isinstance(subject_or_edf, Path) and subject_or_edf.is_file():

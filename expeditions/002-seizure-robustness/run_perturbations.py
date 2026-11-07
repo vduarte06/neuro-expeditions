@@ -4,7 +4,8 @@
 Usage (assumes poetry shell inside expeditions/002-seizure-robustness):
     python run_perturbations.py                    # good-patient subset -> results/perturbations/good_patients/
     python run_perturbations.py --cohort all       # all 14 patients     -> results/perturbations/all_patients/
-    python run_perturbations.py --variations mains_global_50uV,impedance_single_20uV
+    python run_perturbations.py --variations mains_severe,impedance_mild
+    python run_perturbations.py --recordings PN00-1 --variations disconnected_mild   # one file -> custom_patients/
     python run_perturbations.py --list
 """
 
@@ -30,7 +31,16 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 from neuro_expeditions import DATA_DIR
 from neuro_expeditions.datasets import siena
 from neuro_expeditions.models import eventnet
-from neuro_expeditions.perturbations import VARIATIONS_CATALOG, apply_variation, list_variations
+from neuro_expeditions.perturbations import (
+    FOCUS_VARIATIONS,
+    VARIATIONS_CATALOG,
+    apply_variation,
+    get_variation,
+    list_variations,
+    variation_electrodes,
+)
+
+ELECTRODES = list(siena.CHANNELS_10_20.values())  # channel names of siena.load_raw()
 
 CACHE_DIR = DATA_DIR / "cache" / "002-seizure-robustness" / "perturbations"
 CLEAN_CACHE_DIR = DATA_DIR / "cache" / "002-seizure-robustness" / "clean" / "eventnet"
@@ -88,12 +98,20 @@ def main() -> None:
     parser.add_argument(
         "--variations",
         default="",
-        help="Comma-separated list of variations to evaluate (default: all 19 in catalog).",
+        help="Comma-separated list of variations to evaluate (default: the 15 benchmark variations, 5 error types x "
+             "mild/moderate/severe, plus the 4 disconnected focus/contra variations; extra variations can be "
+             "named here too).",
     )
     parser.add_argument(
         "--patients",
         default="",
         help="Comma-separated patient list; overrides --cohort (results go to results/perturbations/custom_patients/).",
+    )
+    parser.add_argument(
+        "--recordings",
+        default="",
+        help="Comma-separated recording list (e.g. PN00-1,PN01-2); overrides --cohort and --patients "
+             "(results go to results/perturbations/custom_patients/).",
     )
     parser.add_argument(
         "--list", "-l",
@@ -110,7 +128,7 @@ def main() -> None:
     if args.list:
         print("Available Technical Error Variations:")
         for v in list_variations():
-            print(f"  • {v['name']:<28} : {v['description']}")
+            print(f"  • {v['name']:<28} [{v['set']}] : {v['description']}")
         return
 
     if args.patients:
@@ -122,11 +140,18 @@ def main() -> None:
     if args.variations:
         target_variations = [v.strip() for v in args.variations.split(",") if v.strip()]
     else:
-        target_variations = list(VARIATIONS_CATALOG.keys())
+        target_variations = list(VARIATIONS_CATALOG) + list(FOCUS_VARIATIONS)
 
     # Get recordings for target patients
     all_recordings = siena.list_recordings()
     recordings = [r for r in all_recordings if siena.patient_id(r) in target_patients]
+    if args.recordings:
+        wanted = {r.strip() for r in args.recordings.split(",") if r.strip()}
+        recordings = [r for r in all_recordings if r.stem in wanted]
+        missing = wanted - {r.stem for r in recordings}
+        if missing:
+            parser.error(f"recording(s) not found: {', '.join(sorted(missing))}")
+        results_dir = RESULTS_DIR / "custom_patients"
 
     print("=" * 80)
     print(" eventNet Technical Error Robustness Benchmark")
@@ -208,6 +233,7 @@ def main() -> None:
         "tp": clean_summary_tp,
         "fp": clean_summary_fp,
         "total_seizures": total_seizures,
+        "n_recordings": len(recordings),
         "delta_recall": 0.0,
         "delta_f1": 0.0,
         "delta_fa_24h": 0.0,
@@ -218,7 +244,7 @@ def main() -> None:
     # 3. Iterate through each perturbation variation
     for v_idx, var_name in enumerate(target_variations, start=1):
         t0 = time.time()
-        var_desc = VARIATIONS_CATALOG[var_name]["desc"]
+        var_desc = get_variation(var_name)["desc"]
         print(f"[{v_idx}/{len(target_variations)}] Running: {var_name}")
         print(f"     Description: {var_desc}", flush=True)
 
@@ -227,6 +253,9 @@ def main() -> None:
 
         var_rows = []
         for edf in recordings:
+            electrodes = variation_electrodes(var_name, edf.stem, ELECTRODES)
+            if not electrodes:  # focus variation, patient without a left/right focus (PN10)
+                continue
             pred_file = var_cache_dir / f"{edf.stem}.tsv"
             if not pred_file.is_file() or args.force:
                 raw = siena.load_raw(edf, attach_annotations=False)
@@ -255,21 +284,28 @@ def main() -> None:
                 "n_seizures": n_sz,
                 "tp": tp,
                 "fp": fp,
+                "electrodes": " ".join(electrodes),
             })
 
         all_recording_rows.extend(var_rows)
 
-        # Aggregate metrics
-        tp_sum = sum(r["tp"] for r in var_rows)
-        fp_sum = sum(r["fp"] for r in var_rows)
-        recall = tp_sum / total_seizures
-        prec = tp_sum / max(1, tp_sum + fp_sum)
-        f1 = 2 * recall * prec / max(1e-6, recall + prec)
-        fa_24h = (fp_sum / total_hours) * 24.0
+        # Aggregate metrics over the recordings this condition applies to, vs clean on the same recordings
+        def aggregate(rows):
+            tp_, fp_ = sum(r["tp"] for r in rows), sum(r["fp"] for r in rows)
+            n_sz_, hours_ = sum(r["n_seizures"] for r in rows), sum(r["hours"] for r in rows)
+            rec_ = tp_ / max(1, n_sz_)
+            prec_ = tp_ / max(1, tp_ + fp_)
+            return tp_, fp_, n_sz_, rec_, prec_, 2 * rec_ * prec_ / max(1e-6, rec_ + prec_), fp_ / hours_ * 24.0
 
-        d_recall = recall - clean_recall
-        d_f1 = f1 - clean_f1
-        d_fa = fa_24h - clean_fa_24h
+        applied = {r["recording"] for r in var_rows}
+        tp_sum, fp_sum, n_sz_sum, recall, prec, f1, fa_24h = aggregate(var_rows)
+        *_, base_recall, _, base_f1, base_fa = aggregate([r for r in clean_rows if r["recording"] in applied])
+        if len(applied) < len(recordings):
+            print(f"     Applies to {len(applied)}/{len(recordings)} recordings; deltas vs clean on those.")
+
+        d_recall = recall - base_recall
+        d_f1 = f1 - base_f1
+        d_fa = fa_24h - base_fa
 
         summary_records.append({
             "condition": var_name,
@@ -280,7 +316,8 @@ def main() -> None:
             "fa_per_24h": fa_24h,
             "tp": tp_sum,
             "fp": fp_sum,
-            "total_seizures": total_seizures,
+            "total_seizures": n_sz_sum,
+            "n_recordings": len(applied),
             "delta_recall": d_recall,
             "delta_f1": d_f1,
             "delta_fa_24h": d_fa,

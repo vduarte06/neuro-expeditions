@@ -6,7 +6,7 @@ which is ~5x faster and enough for recall / latency questions. False alarms are 
 they are peri-ictal FA rates, comparable between conditions but not with the whole-recording numbers.
 
 Suites:
-    acquisition   the 19 acquisition-error conditions of run_perturbations.py (VARIATIONS_CATALOG), so every error
+    acquisition   the 15 acquisition-error conditions of run_perturbations.py (VARIATIONS_CATALOG), so every error
                   type is measured on every detector (test 2 itself runs eventNet only, on whole recordings).
     side          errors on the 3 temporal electrodes over the seizure focus (ipsi) vs the same 3 on the other
                   side (contra); lateralization from subject_info.csv, PN10 (frontal, bilateral) is skipped.

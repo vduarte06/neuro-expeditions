@@ -45,15 +45,18 @@ Errors are applied **per electrode, before re-referencing**. The detectors re-re
 average or bipolar), so one bad electrode leaks into several derived channels. This is a central point of the
 study and should be shown explicitly (clean vs perturbed signal on one electrode and on the derived channels).
 
-| Error | Simulation | Levels |
-|---|---|---|
-| Mains interference | 50 Hz sinusoid | 3 amplitudes |
-| High impedance | broadband noise | 3 SNRs |
-| Disconnected electrode | flat signal or drift | 1, 2 or 3 electrodes |
-| Muscle artefact | high-frequency noise in bursts | 3 intensities |
-| Electrode displacement | mix with neighbouring electrode | 3 proportions |
+| Error | Simulation | Electrodes | Mild | Moderate | Severe |
+|---|---|---|---|---|---|
+| Mains interference | 50 Hz sinusoid, peak amplitude, same phase | 3 random | 5 µV | 20 µV | 50 µV |
+| High impedance | 0.5–70 Hz noise, SNR vs the electrode's own RMS | 2 random | 10 dB | 5 dB | 0 dB |
+| Disconnected electrode | flat signal | random, nested | 1 | 3 | 5 |
+| Muscle artefact | 20–100 Hz bursts, 10% of the time, synchronous | F7, F8, T3–T6 | 20 µV RMS | 50 µV RMS | 100 µV RMS |
+| Electrode displacement | mix with neighbouring electrode | 2 random | α 0.25 | α 0.50 | α 0.75 |
 
-5 error types × 3 levels = 15 conditions + clean baseline, per recording, per detector.
+5 error types × 3 levels = 15 conditions + clean baseline, per recording, per detector. Plus 4 targeted
+disconnection conditions: flat mid-temporal electrode (mild) or temporal chain (severe) over the seizure focus, and
+the same electrodes on the other side as control. Full definitions: [TESTS.md](TESTS.md) test 2 and
+`src/neuro_expeditions/perturbations.py`.
 
 ## Open items
 - **Primary outcome:** the design text was cut off at "Variáveis de resultado". Pick the primary metric (event F1?).
@@ -64,11 +67,8 @@ study and should be shown explicitly (clean vs perturbed signal on one electrode
 - **DINO-EEG defaults:** fixed 60 Hz notch (Siena mains is 50 Hz) and automatic bad-channel interpolation (pyprep),
   which may undo "disconnected electrode" perturbations. Decide: part of the detector, or switched off.
 - **Gotman:** compare with `esl-epfl/gotman_1982`.
-- **Level calibration:** concrete amplitudes, SNRs, burst parameters and mixing proportions, anchored to clinical
-  ranges and each recording's own signal power.
-- **Disconnected electrode:** which electrodes (random, fixed, all combinations); flat vs drift.
-- **Displacement:** define "neighbour" on the 10-20 layout.
-- **Random seeds:** fixed seed per recording × condition, possibly several repeats.
+- **Random seeds:** one fixed draw per recording × error type (decided 2026-11-07); several repeats still open.
+- **Seizure focus:** Siena gives only the side (L/R), not the electrode; "focus" = the temporal chain on that side.
 
 ## Run
 *Assumes an active `poetry shell` inside `expeditions/002-seizure-robustness`.*
@@ -82,6 +82,12 @@ python evaluate_detectors.py --score-only   # re-score cached predictions
 python plot_exam.py                 # pick from a numbered list
 python plot_exam.py PN00-1 --bipolar
 python plot_exam.py PN00-1 --save overview.png
+
+# Perturbations
+python run_perturbations.py --list                                    # list all perturbations (grid, focus, extras)
+python run_perturbations.py                                           # run the 19 default conditions with eventNet
+python run_perturbations.py --patients PN00 --variations disconnected_mild,disconnected_focus_severe
+python plot_exam.py PN00-1 --perturb disconnected_focus_severe --compare   # perturbed signal over clean (grey)
 ```
 Results: `results/clean/` (`metrics_overall.csv`, `metrics_by_patient.csv`, `metrics_by_recording.csv`).
 
@@ -115,3 +121,25 @@ outside this study's protocol.
   reference and used its own windowing/peak rules. Clean baseline and all perturbations are being recomputed;
   old predictions kept in `data/cache/002-seizure-robustness/backup_rewritten_eventnet/`.
 - **DINO-EEG:** added (official code). Detects the PN00-2 seizure (1217–1307 s vs 1220–1274 s) in 11 s on MPS.
+
+### 2026-11-07 · perturbation catalog redefined
+- **Grid:** the 19 ad-hoc conditions were replaced by the 5 × 3 grid of the study design (table above, names
+  `<error>_mild|moderate|severe`). Decisions: mains amplitude = peak, same phase on the 3 electrodes (one source);
+  impedance SNR measured against each electrode's own 0.5–70 Hz RMS (median over 10 s windows, so seizures and
+  artefacts do not inflate it); muscle bursts of 2 s with the same timing on all 6 electrodes and the stated RMS on
+  the burst's flat top.
+- **Electrodes:** random per recording, seeded from the recording name and error type. The three levels share
+  electrodes and noise (only intensity changes), the 1 / 3 / 5 disconnected electrodes are nested, and the electrodes
+  used are written to `metrics_by_recording.csv`.
+- **Disconnected over the focus:** random disconnection rarely hits the seizure side (temporal electrodes over the
+  focus in 5/26, 9/26, 13/26 good-patient recordings at mild / moderate / severe), so it cannot show a location
+  effect. Added `disconnected_focus_mild|severe` (T7/T8, or F7-T7-P7 / F8-T8-P8, on the seizure side from
+  `subject_info.csv`) and `disconnected_contra_mild|severe` (same electrodes, other side). They report three
+  numbers: typical cost of a failed electrode (random), worst case (focus), and the part due to location (focus vs
+  contra). PN10 (bilateral) is excluded from them; their deltas are vs clean on the same recordings. Test 3
+  (`run_extended_tests.py --suite side`) remains the multi-detector version of the same question.
+- **Kept outside the grid** (`EXTRA_VARIATIONS`, not run by default): drift, saturation, perspiration, gain, and the
+  old muscle definition used by test 4.
+- **Perturbed signals are not stored:** regenerated in < 0.5 s per recording; only detector outputs are cached.
+  `plot_exam.py --perturb <condition>` shows any condition on any exam, with the perturbed electrodes listed.
+- Cached outputs of the old condition names are no longer used; the new conditions need a full run.
