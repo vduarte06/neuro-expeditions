@@ -2,7 +2,8 @@
 
 *Robustez de algoritmos de deteção automática de crises epiléticas a erros técnicos de aquisição do EEG*
 
-**Status:** clean baseline done (3 detectors × 41 Siena recordings). Perturbations not implemented yet.
+**Status:** clean baseline and 19 perturbation conditions being recomputed with the official eventNet code
+(see log 2026-11-07). DINO-EEG set up, not yet run on all recordings.
 
 **Background.** Automatic seizure detectors lose a lot of performance outside the data they were developed on.
 In the largest independent challenge so far, the best algorithm reached an event F1 of 32%, and the authors name
@@ -23,7 +24,8 @@ control (clean vs perturbed).
 | | |
 |---|---|
 | Data | Siena Scalp EEG Database (PhysioNet): 14 adult patients, 41 recordings, 141 h, 47 seizures. Referential 10-20, 19 channels used. Seizure times via the official SzCORE parser (`epilepsy2bids`) |
-| Detectors | **eventNet** (deep learning, U-Net, trained on TUSZ only) · **SPaRCNet** (deep learning, DenseNet, MGH/BWH ICU data) · **Gotman 1982** (classical, rule-based, no training) |
+| Detectors | **eventNet** (deep learning, U-Net, trained on TUSZ only) · **SPaRCNet** (deep learning, DenseNet, MGH/BWH ICU data) · **DINO-EEG** (deep learning, DETR-style detector per channel, trained on TUSZ only) · **Gotman 1982** (classical, rule-based, no training) |
+| Implementation | **eventNet:** official SzCORE package (`eventnet`, pinned commit) incl. its SzCORE preprocessing; only the batching loop is ours (the published one cannot run). **DINO-EEG:** official repo cloned, its own preprocessing/merging functions called; CUDA attention op swapped for an identical PyTorch version. **SPaRCNet:** model + weights official; preprocessing copied line by line from `runSPaRCNet.py`; window→event rule is ours (P(seizure) ≥ 0.5). **Gotman:** re-implementation of `esl-epfl/gotman_1982`, not yet checked |
 | Training | None. All used as released; Siena is in none of their training sets |
 | Metrics | SzCORE event scoring (`timescoring`): tolerance −30 s / +60 s, max event 5 min, events < 90 s apart merged. Recall (sensitivity), precision, F1, false alarms per 24 h |
 
@@ -48,8 +50,11 @@ study and should be shown explicitly (clean vs perturbed signal on one electrode
 - **Primary outcome:** the design text was cut off at "Variáveis de resultado". Pick the primary metric (event F1?).
 - **Statistical analysis:** paired per-recording differences vs clean (Wilcoxon, or a mixed model with patient as
   random effect) for H1, detector × condition interaction for H2, correction across 15 conditions.
-- **Detector preprocessing:** the eventNet and SPaRCNet adapters are not yet checked line by line against the
-  official code (re-referencing, filtering).
+- **SPaRCNet event rule:** the official code only outputs a probability per 10 s window. Our rule (any window
+  ≥ 0.5) is likely why it raises ~140 false alarms/24 h. Needs a justified rule (smoothing, consecutive windows).
+- **DINO-EEG defaults:** fixed 60 Hz notch (Siena mains is 50 Hz) and automatic bad-channel interpolation (pyprep),
+  which may undo "disconnected electrode" perturbations. Decide: part of the detector, or switched off.
+- **Gotman:** compare with `esl-epfl/gotman_1982`.
 - **Level calibration:** concrete amplitudes, SNRs, burst parameters and mixing proportions, anchored to clinical
   ranges and each recording's own signal power.
 - **Disconnected electrode:** which electrodes (random, fixed, all combinations); flat vs drift.
@@ -76,7 +81,7 @@ outside this study's protocol.
 
 ## Log
 
-### 2026-11-07 · clean baseline
+### 2026-11-07 · clean baseline (first run)
 | Detector | Recall | Precision | F1 | False alarms / 24 h |
 |---|---|---|---|---|
 | eventNet | 0.57 (27/47) | 0.41 | **0.48** | 6.6 |
@@ -91,3 +96,13 @@ outside this study's protocol.
   but it is where perturbation effects on recall will be most visible.
 - Bug fixed before the run: the eventNet and SPaRCNet adapters passed volts, but both models expect µV. In volts,
   eventNet never crossed its threshold and SPaRCNet output a constant probability.
+- **Superseded:** the eventNet numbers above come from a rewritten adapter without the common-average reference;
+  SPaRCNet's from an adapter without filtering/clipping. See 2026-11-07.
+
+### 2026-11-07 · detector implementations corrected
+- **SPaRCNet:** added the official 60 Hz notch, 0.5–40 Hz band-pass and ±500 µV clipping. Recall 0.72 → 0.79
+  (37/47), but still 140 FA/24 h (F1 0.08), so the remaining problem is the window→event rule.
+- **eventNet:** replaced the rewritten adapter with the official package. The rewrite skipped the SzCORE common-average
+  reference and used its own windowing/peak rules. Clean baseline and all perturbations are being recomputed;
+  old predictions kept in `data/cache/002-seizure-robustness/backup_rewritten_eventnet/`.
+- **DINO-EEG:** added (official code). Detects the PN00-2 seizure (1217–1307 s vs 1220–1274 s) in 11 s on MPS.

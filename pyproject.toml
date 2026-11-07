@@ -19,7 +19,17 @@ dependencies = [
     "matplotlib (>=3.11.2,<4.0.0)",
     "edfio (>=0.4.18,<0.5.0)",
     "epilepsy2bids (>=0.0.7,<0.0.8)",
-    "braindecode (>=2.0.0,<3.0.0) ; python_version < \"3.14\""
+    "braindecode (>=2.0.0,<3.0.0) ; python_version < \"3.14\"",
+    "h5py (>=3.16.0,<4.0.0) ; python_version < \"3.14\"",
+    "addict (>=2.4.0,<3.0.0) ; python_version < \"3.14\"",
+    "termcolor (>=3.3.0,<4.0.0) ; python_version < \"3.14\"",
+    "timm (>=1.0.31,<2.0.0) ; python_version < \"3.14\"",
+    "torchvision (>=0.29.2,<0.30.0) ; python_version < \"3.14\"",
+    "yapf (>=0.43.0,<0.44.0) ; python_version < \"3.14\"",
+    "pyprep (>=0.10.0,<0.11.0) ; python_version < \"3.14\"",
+    "pyyaml (>=6.0.3,<7.0.0) ; python_version < \"3.14\"",
+    "tqdm (>=4.70.1,<5.0.0) ; python_version < \"3.14\"",
+    "eventnet @ git+https://github.com/esl-epfl/eventnet_2024.git@d13866820f436b1d767ef7f27a5419a7735efa5b#subdirectory=eventnet ; python_version < \"3.14\""
 ]
 
 

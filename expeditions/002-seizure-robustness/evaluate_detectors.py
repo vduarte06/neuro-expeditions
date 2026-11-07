@@ -1,6 +1,6 @@
 """002: run the pretrained seizure detectors on Siena and score them with SzCORE (currently: clean, unperturbed data).
 
-Detectors (used as released, no training on Siena): Gotman 1982, eventNet, SPaRCNet.
+Detectors (used as released, no training on Siena): Gotman 1982, eventNet, SPaRCNet, DINO-EEG.
 
     python evaluate_detectors.py
     python evaluate_detectors.py --detectors gotman,eventnet --patients PN00
@@ -33,7 +33,7 @@ from neuro_expeditions.datasets import siena
 HERE = Path(__file__).parent
 CACHE = DATA_DIR / "cache" / "002-seizure-robustness" / "clean"
 RESULTS = HERE / "results" / "clean"
-DETECTORS = ("gotman", "eventnet", "sparcnet")
+DETECTORS = ("gotman", "eventnet", "sparcnet", "dinoeeg")
 # Official SzCORE event-scoring parameters
 SZCORE = scoring.EventScoring.Parameters(
     toleranceStart=30, toleranceEnd=60, minOverlap=0, maxEventDuration=5 * 60, minDurationBetweenEvents=90
@@ -56,6 +56,10 @@ def get_detector(name: str):
 
         model = sparcnet.load_model()
         return lambda raw: sparcnet.detect(raw, model=model)
+    if name == "dinoeeg":
+        from neuro_expeditions.models import dinoeeg
+
+        return dinoeeg.DinoEEG().detect
     raise ValueError(name)
 
 

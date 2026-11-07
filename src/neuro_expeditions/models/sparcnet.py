@@ -261,7 +261,11 @@ def derive_bipolar_montage(raw: mne.io.Raw) -> np.ndarray:
         ca_data = raw_copy.get_data(picks=[ca_match], units="uV")[0]
         data_bipolar.append(an_data - ca_data)
 
-    return np.array(data_bipolar, dtype=np.float32)
+    # Same filtering and clipping as the official SPaRCNet/runSPaRCNet.py
+    bipolar = np.array(data_bipolar, dtype=np.float64)
+    bipolar = mne.filter.notch_filter(bipolar, SFREQ, 60, verbose="error")
+    bipolar = mne.filter.filter_data(bipolar, SFREQ, 0.5, 40, verbose="error")
+    return np.clip(bipolar, -500, 500).astype(np.float32)
 
 
 def detect(
