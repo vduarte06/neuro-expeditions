@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
-"""Run technical error perturbation experiments on eventNet across the Good Patient Subset.
+"""Run the acquisition-error perturbations on whole recordings for one or more detectors, vs their clean baseline.
 
 Usage (assumes poetry shell inside expeditions/002-seizure-robustness):
-    python run_perturbations.py                    # good-patient subset -> results/perturbations/good_patients/
+    python run_perturbations.py                    # eventNet, good-patient subset -> results/perturbations/good_patients/
+    python run_perturbations.py --detectors gotman,sparcnet          # same 19 conditions, other detectors
+    python run_perturbations.py --detectors all                      # gotman, eventnet, sparcnet, dinoeeg
     python run_perturbations.py --cohort all       # all 14 patients     -> results/perturbations/all_patients/
     python run_perturbations.py --variations mains_severe,impedance_mild
+    python run_perturbations.py --patients PN00 --detectors dinoeeg  # one patient -> custom_patients/
     python run_perturbations.py --recordings PN00-1 --variations disconnected_mild   # one file -> custom_patients/
     python run_perturbations.py --list
+
+Each recording is perturbed once and every selected detector runs on the same perturbed signal. A detector is
+compared with its own clean predictions (the evaluate_detectors.py cache, clean/<detector>/), on the same recordings.
+Perturbed predictions are cached in data/cache/002-seizure-robustness/perturbations/<detector>/<condition>/.
+A detector failing on a recording is logged to <results>/errors.log and that recording is left out of its numbers.
+
+Outputs (results/perturbations/<cohort>_patients/), one row per detector x condition (x recording), with a `detector`
+column. Cohort runs merge into the existing files (rows of the same detector and condition are replaced), so models
+run separately end up side by side; custom_patients/ is overwritten on every run.
+    summary_by_variation.csv   recall, precision, f1, fa_per_24h, deltas vs clean
+    metrics_by_recording.csv   per recording: hours, n_seizures, tp, fp, perturbed electrodes
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
-import json
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -28,9 +42,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from evaluate_detectors import DETECTORS, get_detector
 from neuro_expeditions import DATA_DIR
 from neuro_expeditions.datasets import siena
-from neuro_expeditions.models import eventnet
 from neuro_expeditions.perturbations import (
     FOCUS_VARIATIONS,
     VARIATIONS_CATALOG,
@@ -42,8 +56,8 @@ from neuro_expeditions.perturbations import (
 
 ELECTRODES = list(siena.CHANNELS_10_20.values())  # channel names of siena.load_raw()
 
-CACHE_DIR = DATA_DIR / "cache" / "002-seizure-robustness" / "perturbations"
-CLEAN_CACHE_DIR = DATA_DIR / "cache" / "002-seizure-robustness" / "clean" / "eventnet"
+CACHE_DIR = DATA_DIR / "cache" / "002-seizure-robustness" / "perturbations"  # <detector>/<condition>/<rec>.tsv
+CLEAN_CACHE_DIR = DATA_DIR / "cache" / "002-seizure-robustness" / "clean"  # <detector>/<rec>.tsv (evaluate_detectors)
 RESULTS_DIR = Path(__file__).resolve().parent / "results" / "perturbations"
 
 # Baseline cohort ("good patients"). Inclusion criteria (README / TESTS.md): temporal seizure localization and at
@@ -84,9 +98,52 @@ def score_events(ref_intervals, hyp_df: pd.DataFrame, duration: float) -> tuple[
     return int(ev.refTrue), int(ev.tp), int(ev.fp)
 
 
+
+def read_events(path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path, sep="\t")
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=["onset_sec", "offset_sec"])
+
+
+def aggregate(rows: list[dict]) -> dict:
+    """Event metrics pooled over recordings."""
+    tp, fp = sum(r["tp"] for r in rows), sum(r["fp"] for r in rows)
+    n_sz, hours = sum(r["n_seizures"] for r in rows), sum(r["hours"] for r in rows)
+    recall = tp / max(1, n_sz)
+    precision = tp / max(1, tp + fp)
+    return {
+        "recall": recall,
+        "precision": precision,
+        "f1": 2 * recall * precision / max(1e-6, recall + precision),
+        "fa_per_24h": fp / max(hours, 1e-9) * 24.0,
+        "tp": tp,
+        "fp": fp,
+        "total_seizures": n_sz,
+        "n_recordings": len(rows),
+    }
+
+
+def save_merged(df: pd.DataFrame, path: Path, merge: bool) -> None:
+    """Write df. With merge, rows of an existing file are kept unless df has the same (detector, condition)."""
+    keys = ["detector", "condition"]
+    if merge and path.is_file():
+        old = pd.read_csv(path)
+        if set(keys) <= set(old.columns):  # files from before the detector column are replaced
+            new = set(map(tuple, df[keys].astype(str).values))
+            old = old[[tuple(k) not in new for k in old[keys].astype(str).values]]
+            df = pd.concat([old, df], ignore_index=True)
+    df.round(4).to_csv(path, index=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run perturbation experiments on eventNet for the Good Patient Subset."
+        description="Run the perturbation conditions on whole recordings for one or more detectors, vs clean."
+    )
+    parser.add_argument(
+        "--detectors",
+        default="eventnet",
+        help=f"Comma-separated detectors, or 'all' ({', '.join(DETECTORS)}). Default: eventnet.",
     )
     parser.add_argument(
         "--cohort",
@@ -121,7 +178,8 @@ def main() -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Recompute predictions even if cached.",
+        help="Recompute perturbed predictions even if cached (clean predictions are reused; delete "
+             "data/cache/002-seizure-robustness/clean/<detector>/ or use evaluate_detectors.py to redo them).",
     )
     args = parser.parse_args()
 
@@ -131,6 +189,13 @@ def main() -> None:
             print(f"  • {v['name']:<28} [{v['set']}] : {v['description']}")
         return
 
+    detectors = list(DETECTORS) if args.detectors.strip() == "all" else [
+        d.strip() for d in args.detectors.split(",") if d.strip()
+    ]
+    unknown = [d for d in detectors if d not in DETECTORS]
+    if unknown or not detectors:
+        parser.error(f"unknown detector(s) {unknown}; choose from {', '.join(DETECTORS)} or 'all'")
+
     if args.patients:
         target_patients = [p.strip() for p in args.patients.split(",") if p.strip()]
         results_dir = RESULTS_DIR / "custom_patients"
@@ -139,10 +204,11 @@ def main() -> None:
         results_dir = RESULTS_DIR / f"{args.cohort}_patients"
     if args.variations:
         target_variations = [v.strip() for v in args.variations.split(",") if v.strip()]
+        for v in target_variations:
+            get_variation(v)  # fail early on a typo
     else:
         target_variations = list(VARIATIONS_CATALOG) + list(FOCUS_VARIATIONS)
 
-    # Get recordings for target patients
     all_recordings = siena.list_recordings()
     recordings = [r for r in all_recordings if siena.patient_id(r) in target_patients]
     if args.recordings:
@@ -152,196 +218,152 @@ def main() -> None:
         if missing:
             parser.error(f"recording(s) not found: {', '.join(sorted(missing))}")
         results_dir = RESULTS_DIR / "custom_patients"
+    merge = results_dir.name != "custom_patients"
 
     print("=" * 80)
-    print(" eventNet Technical Error Robustness Benchmark")
+    print(" Technical Error Robustness Benchmark")
     print("=" * 80)
-    print(f" Cohort           : {len(target_patients)} patients ({len(recordings)} recordings)")
+    print(f" Detectors        : {', '.join(detectors)}")
+    print(f" Recordings       : {len(recordings)} ({len({siena.patient_id(r) for r in recordings})} patients)")
     print(f" Variations       : {len(target_variations)} conditions")
-    print(f" Cache Directory  : {CACHE_DIR}")
+    print(f" Cache Directory  : {CACHE_DIR}/<detector>/<condition>/")
     print(f" Results Directory: {results_dir}")
     print("=" * 80, flush=True)
-
     results_dir.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    errors_log = results_dir / "errors.log"
 
-    # 1. Load eventNet model
-    print("Loading eventNet pre-trained weights...", flush=True)
-    model = eventnet.load_model()
+    durations = {edf.stem: get_recording_duration(edf) for edf in recordings}
+    ground_truths = {edf.stem: siena.load_seizures(edf) for edf in recordings}
+    print(f"Total dataset: {sum(durations.values()) / 3600:.2f} hours, "
+          f"{sum(len(s) for s in ground_truths.values())} true seizures across {len(recordings)} files.\n")
 
-    # Pre-cache durations and ground truth seizures
-    durations = {}
-    ground_truths = {}
-    total_hours = 0.0
-    for edf in recordings:
-        dur = get_recording_duration(edf)
-        durations[edf.stem] = dur
-        ground_truths[edf.stem] = siena.load_seizures(edf)
-        total_hours += dur / 3600.0
+    loaded: dict = {}
 
-    total_seizures = sum(len(sz) for sz in ground_truths.values())
-    print(f"Total dataset: {total_hours:.2f} hours, {total_seizures} true seizures across {len(recordings)} files.\n")
+    def predict(detector: str, raw, dest: Path, label: str) -> None:
+        """Run a detector on raw and cache its events at dest; failures are logged and leave no cache file."""
+        t0 = time.time()
+        try:
+            if detector not in loaded:
+                print(f"     Loading {detector}...", flush=True)
+                loaded[detector] = get_detector(detector)
+            events = loaded[detector](raw)
+        except Exception:
+            dest.unlink(missing_ok=True)
+            with open(errors_log, "a") as f:
+                f.write(f"--- {detector} {label} {time.strftime('%Y-%m-%d %H:%M')}\n{traceback.format_exc()}\n")
+            print(f"     {label} [{detector}] FAILED (see {errors_log.name})", flush=True)
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        events.to_csv(dest, sep="\t", index=False)
+        print(f"     {label} [{detector}] {len(events)} event(s) in {time.time() - t0:.0f}s", flush=True)
 
-    # 2. Score Clean Baseline for reference
-    clean_rows = []
-    print("Evaluating Clean Baseline...", flush=True)
-    for edf in recordings:
-        pred_file = CLEAN_CACHE_DIR / f"{edf.stem}.tsv"
-        if not pred_file.is_file() or args.force:
-            raw = siena.load_raw(edf, attach_annotations=False)
-            df = eventnet.detect(raw, model=model)
-            CLEAN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            df.to_csv(pred_file, sep="\t", index=False)
-            del raw
-            gc.collect()
-        else:
-            try:
-                df = pd.read_csv(pred_file, sep="\t")
-            except pd.errors.EmptyDataError:
-                df = pd.DataFrame(columns=["onset_sec", "offset_sec"])
-
+    def score_row(detector: str, condition: str, edf: Path, events: pd.DataFrame, electrodes: str = "") -> dict:
         dur = durations[edf.stem]
-        ref_sz = ground_truths[edf.stem]
-        n_sz, tp, fp = score_events(ref_sz, df, dur)
-        clean_rows.append({
-            "condition": "clean",
+        n_sz, tp, fp = score_events(ground_truths[edf.stem], events, dur)
+        return {
+            "detector": detector,
+            "condition": condition,
             "recording": edf.stem,
             "patient": siena.patient_id(edf),
             "hours": dur / 3600.0,
             "n_seizures": n_sz,
             "tp": tp,
             "fp": fp,
-        })
+            "electrodes": electrodes,
+        }
 
-    clean_summary_tp = sum(r["tp"] for r in clean_rows)
-    clean_summary_fp = sum(r["fp"] for r in clean_rows)
-    clean_recall = clean_summary_tp / total_seizures
-    clean_prec = clean_summary_tp / max(1, clean_summary_tp + clean_summary_fp)
-    clean_f1 = 2 * clean_recall * clean_prec / max(1e-6, clean_recall + clean_prec)
-    clean_fa_24h = (clean_summary_fp / total_hours) * 24.0
+    summary_records: list[dict] = []
+    recording_rows: list[dict] = []
 
-    print(f"Clean Baseline: Recall={clean_recall:.1%} ({clean_summary_tp}/{total_seizures}), "
-          f"Precision={clean_prec:.1%}, F1={clean_f1:.3f}, FA/24h={clean_fa_24h:.1f}\n")
+    def save() -> None:
+        save_merged(pd.DataFrame(summary_records), results_dir / "summary_by_variation.csv", merge)
+        save_merged(pd.DataFrame(recording_rows), results_dir / "metrics_by_recording.csv", merge)
 
-    summary_records = [{
-        "condition": "clean",
-        "description": "Clean unperturbed baseline",
-        "recall": clean_recall,
-        "precision": clean_prec,
-        "f1": clean_f1,
-        "fa_per_24h": clean_fa_24h,
-        "tp": clean_summary_tp,
-        "fp": clean_summary_fp,
-        "total_seizures": total_seizures,
-        "n_recordings": len(recordings),
-        "delta_recall": 0.0,
-        "delta_f1": 0.0,
-        "delta_fa_24h": 0.0,
-    }]
+    # 1. Clean baseline per detector (cache shared with evaluate_detectors.py)
+    print("Clean baseline...", flush=True)
+    clean_rows: dict[str, list[dict]] = {d: [] for d in detectors}
+    for edf in recordings:
+        dests = {d: CLEAN_CACHE_DIR / d / f"{edf.stem}.tsv" for d in detectors}
+        pending = [d for d in detectors if not dests[d].is_file()]
+        if pending:
+            raw = siena.load_raw(edf, attach_annotations=False)
+            for d in pending:
+                predict(d, raw, dests[d], f"{edf.stem} clean")
+            del raw
+            gc.collect()
+        for d in detectors:
+            if dests[d].is_file():
+                clean_rows[d].append(score_row(d, "clean", edf, read_events(dests[d])))
 
-    all_recording_rows = list(clean_rows)
+    for d in detectors:
+        m = aggregate(clean_rows[d])
+        summary_records.append({"detector": d, "condition": "clean", "description": "Clean unperturbed baseline",
+                                **m, "delta_recall": 0.0, "delta_f1": 0.0, "delta_fa_24h": 0.0})
+        recording_rows.extend(clean_rows[d])
+        print(f"  [{d:<8}] Recall={m['recall']:.1%} ({m['tp']}/{m['total_seizures']}), "
+              f"Precision={m['precision']:.1%}, F1={m['f1']:.3f}, FA/24h={m['fa_per_24h']:.1f}")
+    print(flush=True)
+    clean_stems = {d: {r["recording"] for r in clean_rows[d]} for d in detectors}
 
-    # 3. Iterate through each perturbation variation
+    # 2. Each condition: perturb each recording once, run every detector on it, score vs clean on the same recordings
     for v_idx, var_name in enumerate(target_variations, start=1):
         t0 = time.time()
         var_desc = get_variation(var_name)["desc"]
         print(f"[{v_idx}/{len(target_variations)}] Running: {var_name}")
         print(f"     Description: {var_desc}", flush=True)
 
-        var_cache_dir = CACHE_DIR / var_name
-        var_cache_dir.mkdir(parents=True, exist_ok=True)
-
-        var_rows = []
+        var_rows: dict[str, list[dict]] = {d: [] for d in detectors}
         for edf in recordings:
             electrodes = variation_electrodes(var_name, edf.stem, ELECTRODES)
             if not electrodes:  # focus variation, patient without a left/right focus (PN10)
                 continue
-            pred_file = var_cache_dir / f"{edf.stem}.tsv"
-            if not pred_file.is_file() or args.force:
+            dests = {d: CACHE_DIR / d / var_name / f"{edf.stem}.tsv" for d in detectors}
+            pending = [d for d in detectors if args.force or not dests[d].is_file()]
+            if pending:
                 raw = siena.load_raw(edf, attach_annotations=False)
-                # Apply variation upstream in referential montage
-                perturbed_raw = apply_variation(raw, var_name)
-                # Run detector
-                df = eventnet.detect(perturbed_raw, model=model)
-                df.to_csv(pred_file, sep="\t", index=False)
-                del raw
-                del perturbed_raw
+                perturbed = apply_variation(raw, var_name)  # upstream, in the referential montage
+                for d in pending:
+                    predict(d, perturbed, dests[d], f"{edf.stem} {var_name}")
+                del raw, perturbed
                 gc.collect()
-            else:
-                try:
-                    df = pd.read_csv(pred_file, sep="\t")
-                except pd.errors.EmptyDataError:
-                    df = pd.DataFrame(columns=["onset_sec", "offset_sec"])
+            for d in detectors:
+                if dests[d].is_file() and edf.stem in clean_stems[d]:
+                    var_rows[d].append(score_row(d, var_name, edf, read_events(dests[d]), " ".join(electrodes)))
 
-            dur = durations[edf.stem]
-            ref_sz = ground_truths[edf.stem]
-            n_sz, tp, fp = score_events(ref_sz, df, dur)
-            var_rows.append({
+        for d in detectors:
+            rows = var_rows[d]
+            if not rows:
+                print(f"     [{d:<8}] no results")
+                continue
+            applied = {r["recording"] for r in rows}
+            m = aggregate(rows)
+            base = aggregate([r for r in clean_rows[d] if r["recording"] in applied])
+            rec = {
+                "detector": d,
                 "condition": var_name,
-                "recording": edf.stem,
-                "patient": siena.patient_id(edf),
-                "hours": dur / 3600.0,
-                "n_seizures": n_sz,
-                "tp": tp,
-                "fp": fp,
-                "electrodes": " ".join(electrodes),
-            })
+                "description": var_desc,
+                **m,
+                "delta_recall": m["recall"] - base["recall"],
+                "delta_f1": m["f1"] - base["f1"],
+                "delta_fa_24h": m["fa_per_24h"] - base["fa_per_24h"],
+            }
+            summary_records.append(rec)
+            recording_rows.extend(rows)
+            note = f"  [{len(applied)}/{len(recordings)} recordings]" if len(applied) < len(recordings) else ""
+            print(f"     [{d:<8}] Recall: {m['recall']:.1%} (Δ {rec['delta_recall']:+.1%}) | "
+                  f"F1: {m['f1']:.3f} (Δ {rec['delta_f1']:+.3f}) | "
+                  f"FA/24h: {m['fa_per_24h']:.1f} (Δ {rec['delta_fa_24h']:+.1f}){note}", flush=True)
+        print(f"     [{time.time() - t0:.1f}s]\n", flush=True)
+        save()
 
-        all_recording_rows.extend(var_rows)
-
-        # Aggregate metrics over the recordings this condition applies to, vs clean on the same recordings
-        def aggregate(rows):
-            tp_, fp_ = sum(r["tp"] for r in rows), sum(r["fp"] for r in rows)
-            n_sz_, hours_ = sum(r["n_seizures"] for r in rows), sum(r["hours"] for r in rows)
-            rec_ = tp_ / max(1, n_sz_)
-            prec_ = tp_ / max(1, tp_ + fp_)
-            return tp_, fp_, n_sz_, rec_, prec_, 2 * rec_ * prec_ / max(1e-6, rec_ + prec_), fp_ / hours_ * 24.0
-
-        applied = {r["recording"] for r in var_rows}
-        tp_sum, fp_sum, n_sz_sum, recall, prec, f1, fa_24h = aggregate(var_rows)
-        *_, base_recall, _, base_f1, base_fa = aggregate([r for r in clean_rows if r["recording"] in applied])
-        if len(applied) < len(recordings):
-            print(f"     Applies to {len(applied)}/{len(recordings)} recordings; deltas vs clean on those.")
-
-        d_recall = recall - base_recall
-        d_f1 = f1 - base_f1
-        d_fa = fa_24h - base_fa
-
-        summary_records.append({
-            "condition": var_name,
-            "description": var_desc,
-            "recall": recall,
-            "precision": prec,
-            "f1": f1,
-            "fa_per_24h": fa_24h,
-            "tp": tp_sum,
-            "fp": fp_sum,
-            "total_seizures": n_sz_sum,
-            "n_recordings": len(applied),
-            "delta_recall": d_recall,
-            "delta_f1": d_f1,
-            "delta_fa_24h": d_fa,
-        })
-
-        elapsed = time.time() - t0
-        print(f"     => Recall: {recall:.1%} (Δ {d_recall:+.1%}) | F1: {f1:.3f} (Δ {d_f1:+.3f}) | "
-              f"FA/24h: {fa_24h:.1f} (Δ {d_fa:+.1f}) [{elapsed:.1f}s]\n", flush=True)
-
-        # Periodically save intermediate summary CSV
-        summary_df = pd.DataFrame(summary_records)
-        summary_df.to_csv(results_dir / "summary_by_variation.csv", index=False)
-
-    # 4. Final summary and reporting
+    # 3. Final summary
+    save()
     summary_df = pd.DataFrame(summary_records).round(4)
-    summary_df.to_csv(results_dir / "summary_by_variation.csv", index=False)
-
-    rec_df = pd.DataFrame(all_recording_rows).round(4)
-    rec_df.to_csv(results_dir / "metrics_by_recording.csv", index=False)
-
     print("=" * 80)
     print(" ALL PERTURBATIONS COMPLETE — Summary Benchmark Table")
     print("=" * 80)
-    display_cols = ["condition", "recall", "precision", "f1", "fa_per_24h", "delta_recall", "delta_f1", "delta_fa_24h"]
+    display_cols = ["detector", "condition", "recall", "precision", "f1", "fa_per_24h",
+                    "delta_recall", "delta_f1", "delta_fa_24h"]
     print(summary_df[display_cols].to_string(index=False))
     print("=" * 80)
     print(f"Results saved to: {results_dir / 'summary_by_variation.csv'}\n")

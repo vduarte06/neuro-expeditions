@@ -10,9 +10,10 @@ T1–T11 are given in brackets below).
 | # | Test | Question | Script | Patients | Detectors | Results folder | Status (2026-11-07, 14:30) |
 |---|---|---|---|---|---|---|---|
 | 1 | Clean baseline | What can each detector detect on unmodified EEG? | `evaluate_detectors.py` | all 14 | all 4 | `results/clean/` | **done** (all 41 recordings) |
-| 2a | Acquisition errors, good patients | How much do 19 simulated errors change eventNet where it works well? | `run_perturbations.py --cohort good` | 9 good | eventNet | `results/perturbations/good_patients/` | stopped: perturbation design under review (3/19 conditions cached) |
-| 2b | Acquisition errors, all patients | Same, on everyone | `run_perturbations.py --cohort all` | all 14 | eventNet | `results/perturbations/all_patients/` | not started |
+| 2a | Acquisition errors, good patients | How much do 19 simulated errors change eventNet where it works well? | `run_perturbations.py --cohort good` | 9 good | eventNet (others with `--detectors`) | `results/perturbations/good_patients/` | conditions redefined 2026-11-07; not run yet |
+| 2b | Acquisition errors, all patients | Same, on everyone | `run_perturbations.py --cohort all` | all 14 | eventNet (others with `--detectors`) | `results/perturbations/all_patients/` | not started |
 | 2c | Acquisition errors, all detectors | Do the detectors differ in how much the same 19 errors change them (H2)? | `run_extended_tests.py --suite acquisition` | 9 good | all 4 | `results/extended/good_patients/acquisition_*` | not started |
+| 2s | Error survival through preprocessing | How strong is each error at each model's input, after its filters and montage? | `preprocessing_survival.py` | 9 good (1 recording each) | all 4 (no models) | `results/preprocessing_survival/good_patients/` | **done** (2026-11-08) |
 | 3 | Seizure side [T3] | Does an error over the seizure focus hurt more than the same error on the other side? | `run_extended_tests.py --suite side` | 9 good | all 4 | `results/extended/good_patients/side_*` | stopped: perturbation design under review (~2/3 of windows cached) |
 | 4 | Seizure timing [T5] | Does an artefact during the seizure only cause misses that the same artefact spread over time does not? | `run_extended_tests.py --suite timing` | 9 good | all 4 | `results/extended/good_patients/timing_*` | not started |
 | 5 | Single-electrode map [T2] | Which electrode, when noisy, does most damage, and does it differ between common-average and bipolar detectors? | `run_extended_tests.py --suite electrode_map` | 9 good | all 4 | `results/extended/good_patients/electrode_map_*` | not started |
@@ -90,7 +91,7 @@ python evaluate_detectors.py --score-only             # re-score cached predicti
 | `errors.log` | only present if a detector failed on a recording |
 | `run.log`, `run_dinoeeg.log` | console output of the run (DINO-EEG was run separately because it is the slowest) |
 
-## Test 2 · Acquisition errors (eventNet)
+## Test 2 · Acquisition errors (whole recordings; eventNet by default, any detector)
 
 **Question.** H1: do technical errors reduce performance, and does the drop depend on error type and intensity?
 
@@ -101,8 +102,10 @@ patients, which shows whether the effect depends on how well eventNet handles a 
 cached outputs.
 
 ```bash
-python run_perturbations.py --cohort good    # 2a
-python run_perturbations.py --cohort all     # 2b
+python run_perturbations.py --cohort good    # 2a (eventNet)
+python run_perturbations.py --cohort all     # 2b (eventNet)
+python run_perturbations.py --detectors gotman,sparcnet,dinoeeg   # same conditions, other detectors
+python run_perturbations.py --detectors all --patients PN00       # one patient, all 4 detectors
 python run_perturbations.py --list           # the 15 grid + 4 focus conditions (+ extras)
 python run_perturbations.py --variations mains_severe,disconnected_mild
 python plot_exam.py PN00-1 --perturb muscle_severe   # look at one condition on one exam
@@ -141,20 +144,25 @@ Extra conditions, outside the grid and not run by default (fixed electrodes, nam
 `gain_attenuation_0.5x`, `gain_amplification_2.0x`, and the earlier muscle definition `muscle_temporal_40uV`,
 `muscle_temporal_100uV` (30–100 Hz, 6 bursts/min of 2.5 s on F7, T7, F8, T8), still used by test 4.
 
-**Results** (`results/perturbations/<good|all>_patients/`)
+Each recording is perturbed once and every selected detector runs on that same signal; each detector is compared
+with its own clean predictions (`evaluate_detectors.py` cache). Whole recordings take about 8 s (eventNet), 4 s
+(Gotman), 1 s (SPaRCNet) and 16 s (DINO-EEG) per 44 min recording and condition on this machine. A detector that fails
+on a recording is logged to `errors.log` and that recording is left out of its numbers.
+
+**Results** (`results/perturbations/<good|all>_patients/`; one `detector` column, cohort runs merge so detectors run
+separately end up in the same files; `custom_patients/` is overwritten on each run)
 
 | File | Content |
 |---|---|
-| `summary_by_variation.csv` | one row per condition (first row = clean): recall, precision, f1, fa_per_24h, tp, fp, total_seizures, n_recordings, and `delta_recall`, `delta_f1`, `delta_fa_24h` vs clean on the same recordings |
-| `metrics_by_recording.csv` | per condition × recording: patient, hours, n_seizures, tp, fp (for paired statistics), electrodes (perturbed electrodes) |
-| `run.log` | console output |
+| `summary_by_variation.csv` | one row per detector × condition (incl. clean): recall, precision, f1, fa_per_24h, tp, fp, total_seizures, n_recordings, and `delta_recall`, `delta_f1`, `delta_fa_24h` vs clean on the same recordings |
+| `metrics_by_recording.csv` | per detector × condition × recording: patient, hours, n_seizures, tp, fp (for paired statistics), electrodes (perturbed electrodes) |
+| `errors.log` | detector failures (traceback per detector × recording × condition) |
 
 ## Test 2c · Acquisition errors on all detectors
 
-**Question.** H2: do the detector families differ in robustness? Test 2 only runs eventNet, so on its own it cannot
-compare detectors. Test 2c applies the same 19 conditions (same catalog, same seed) to all 4 detectors, so every error
-type is measured on every detector. Mains interference, gain errors and the drift / saturation disconnections are
-covered by no other test for DINO-EEG, SPaRCNet and Gotman.
+**Question.** H2: do the detector families differ in robustness? Test 2 can now run every detector on whole recordings
+(`--detectors`). Test 2c applies the 15 grid conditions (`VARIATIONS_CATALOG`, same electrodes and noise) to all 4
+detectors on seizure windows only, which is faster; the 4 focus/contra conditions are covered there by test 3.
 
 **What is done.** Like tests 3–5 it runs on the seizure windows, not whole recordings (see below), so its numbers are
 comparable between detectors and conditions, but not directly with test 2. eventNet appears in both, which shows how
@@ -166,6 +174,30 @@ python run_extended_tests.py --suite acquisition --cohort all
 ```
 
 Results: `results/extended/<good|all>_patients/acquisition_*`, same files and columns as tests 3–5.
+
+## Test 2s · How much of each error reaches each model (no models run)
+
+**Question.** Each detector filters and re-references the signal before its model sees it. How strong is each
+perturbation at the model input? This separates robustness of the model from errors that the preprocessing removes
+(or amplifies) before the model.
+
+**What is done.** For the first seizure recording of each good patient, the whole recording is perturbed (as in test 2),
+then a 600 s segment around the first seizure is passed, clean and perturbed, through each detector's input
+conversion (SzCORE for eventNet and Gotman, none for SPaRCNet and DINO-EEG) and its own preprocessing, up to the
+model input. Per channel: perturbation-to-signal ratio
+`psr = 10·log10(Σ(perturbed − clean)² / Σclean²)`. `psr_in_db`: at the perturbed electrodes, above 0.5 Hz.
+`psr_out_db`: worst model-input channel. `survival_db = psr_out − psr_in` (0 = full strength; −20 = 1% of its power;
+> 0 = larger relative to the signal than at the electrode, e.g. because a bipolar derivation cancels shared EEG but
+not the error). Also counted: recordings where DINO-EEG's pyprep interpolates a perturbed electrode.
+
+```bash
+python preprocessing_survival.py                                   # 9 recordings x 19 conditions x 4 detectors
+python preprocessing_survival.py --recordings PN00-1 --variations mains_severe
+```
+
+Results (`results/preprocessing_survival/good_patients/`): `survival_by_recording.csv`, `survival_summary.csv`.
+`psr_in_db` of the impedance conditions is ~5 dB below the defined SNR because it is measured on this segment's mean
+power (seizure included), while the SNR is set from the whole recording's median 10 s RMS.
 
 ## Test 3 · Seizure side [T3]
 
@@ -287,7 +319,7 @@ results/
     └── all_patients/              test 6
 ```
 `results/` is not committed (`.gitignore`). Detector outputs are cached in `data/cache/002-seizure-robustness/`
-(`clean/`, `perturbations/<condition>/`, `extended/<condition>/<detector>/`); papers are in
+(`clean/<detector>/`, `perturbations/<detector>/<condition>/`, `extended/<condition>/<detector>/`); papers are in
 `data/papers/002-seizure-robustness/`. Neither is committed.
 
 ## Environment notes

@@ -34,11 +34,34 @@ patients. Details per test: [TESTS.md](TESTS.md).
 |---|---|
 | Data | Siena Scalp EEG Database (PhysioNet): 14 adult patients, 41 recordings, 141 h, 47 seizures. Referential 10-20, 19 channels used. Seizure times via the official SzCORE parser (`epilepsy2bids`) |
 | Detectors | **eventNet** (deep learning, U-Net, trained on TUSZ only) · **SPaRCNet** (deep learning, DenseNet, MGH/BWH ICU data) · **DINO-EEG** (deep learning, DETR-style detector per channel, trained on TUSZ only) · **Gotman 1982** (classical, rule-based, no training) |
-| Implementation | **eventNet:** official SzCORE package (`eventnet`, pinned commit) incl. its SzCORE preprocessing; only the batching loop is ours (the published one cannot run). **DINO-EEG:** official repo cloned, its own preprocessing/merging functions called; CUDA attention op swapped for an identical PyTorch version. **SPaRCNet:** model + weights official; preprocessing copied line by line from `runSPaRCNet.py`; window→event rule is ours (P(seizure) ≥ 0.5). **Gotman:** re-implementation of `esl-epfl/gotman_1982`, not yet checked |
+| Implementation | **eventNet:** official SzCORE package (`eventnet`, pinned commit) incl. its SzCORE preprocessing; only the batching loop is ours (the published one cannot run). **DINO-EEG:** official repo cloned, its own preprocessing/merging functions called; CUDA attention op swapped for an identical PyTorch version. **SPaRCNet:** model + weights official; preprocessing copied line by line from `runSPaRCNet.py`; window→event rule is ours (P(seizure) ≥ 0.5). **Gotman:** port of `esl-epfl/gotman_1982` (commit 371d4b0) with the same output: official input (SzCORE format → 18-ch double banana, µV, 256 Hz), thresholds, window loop, cross-channel rule and events (no minimum duration); only the cross-channel loop is rewritten for speed. Sample-identical to a transcription of the official code on 7 recordings (9.5 h) |
 | Training | None. All used as released; Siena is in none of their training sets |
 | Metrics | SzCORE event scoring (`timescoring`): tolerance −30 s / +60 s, max event 5 min, events < 90 s apart merged. Recall (sensitivity), precision, F1, false alarms per 24 h |
 
 Literature behind the choices (datasets and model alternatives): [literature_investigation.md](literature_investigation.md).
+
+## Pipeline
+```
+Siena EDF → 19 referential channels (512 Hz) → error injection → each detector's input format → its own
+preprocessing → model → detections (.tsv) → SzCORE evaluation
+```
+Each detector gets the input format its official code expects. eventNet and Gotman: the SzCORE format (official
+epilepsy2bids conversion: 256 Hz, common average, µV); eventNet was trained on it and the official Gotman baseline
+reads it. SPaRCNet and DINO-EEG: the referential signal, as their official scripts read it. Their bipolar montages
+cancel any common reference, so SzCORE conversion would only add a resampling step for SPaRCNet, and for DINO-EEG it
+would hide flat electrodes from pyprep (see 2026-11-08). Errors are injected **before** any conversion, on the
+electrodes, because that is where acquisition errors happen: a disconnected electrode is flat in the referential
+signal, not in a derived channel, and a faulty electrode leaks into the common average.
+
+Each detector's own preprocessing, as released: eventNet none; Gotman 18 bipolar + 60 Hz low-pass; SPaRCNet 16
+bipolar, 200 Hz, 60 Hz notch, 0.5–40 Hz, clip ±500 µV; DINO-EEG 200 Hz, 60 Hz notch, 0.1–70 Hz, pyprep bad-channel
+interpolation, TCP bipolar. **Note on the 60 Hz notch:** SPaRCNet and DINO-EEG were built for US data (60 Hz mains)
+and are run with their released 60 Hz notch, although Siena (Italy) has 50 Hz mains. So the 50 Hz mains errors are
+not notched out; SPaRCNet removes them anyway with its 40 Hz low-pass, DINO-EEG keeps them. The detectors are
+treated as fixed tools, run as released: the study is about the technician's role in delivering a clean signal, so
+what a released detector does not remove is the technician's to prevent. When reporting mains results, note that
+DINO-EEG's vulnerability comes partly from a US default running on European data, not from its architecture alone.
+How much of each error reaches each model is measured by `preprocessing_survival.py` (no models run).
 
 ## Intervention: simulated acquisition errors
 Errors are applied **per electrode, before re-referencing**. The detectors re-reference internally (common
@@ -66,7 +89,8 @@ the same electrodes on the other side as control. Full definitions: [TESTS.md](T
   ≥ 0.5) is likely why it raises ~140 false alarms/24 h. Needs a justified rule (smoothing, consecutive windows).
 - **DINO-EEG defaults:** fixed 60 Hz notch (Siena mains is 50 Hz) and automatic bad-channel interpolation (pyprep),
   which may undo "disconnected electrode" perturbations. Decide: part of the detector, or switched off.
-- **Gotman:** compare with `esl-epfl/gotman_1982`.
+- **Gotman:** now exactly the official `esl-epfl/gotman_1982` (2026-11-08); the results below predate this and must
+  be rerun.
 - **Random seeds:** one fixed draw per recording × error type (decided 2026-11-07); several repeats still open.
 - **Seizure focus:** Siena gives only the side (L/R), not the electrode; "focus" = the temporal chain on that side.
 
@@ -86,8 +110,10 @@ python plot_exam.py PN00-1 --save overview.png
 # Perturbations
 python run_perturbations.py --list                                    # list all perturbations (grid, focus, extras)
 python run_perturbations.py                                           # run the 19 default conditions with eventNet
+python run_perturbations.py --detectors gotman,sparcnet               # same conditions, other detectors (or: all)
 python run_perturbations.py --patients PN00 --variations disconnected_mild,disconnected_focus_severe
 python plot_exam.py PN00-1 --perturb disconnected_focus_severe --compare   # perturbed signal over clean (grey)
+python preprocessing_survival.py                                      # how much of each error reaches each model
 ```
 Results: `results/clean/` (`metrics_overall.csv`, `metrics_by_patient.csv`, `metrics_by_recording.csv`).
 
@@ -143,3 +169,49 @@ outside this study's protocol.
 - **Perturbed signals are not stored:** regenerated in < 0.5 s per recording; only detector outputs are cached.
   `plot_exam.py --perturb <condition>` shows any condition on any exam, with the perturbed electrodes listed.
 - Cached outputs of the old condition names are no longer used; the new conditions need a full run.
+- **All detectors on whole recordings:** `run_perturbations.py --detectors <list|all>` runs the same conditions on
+  Gotman, SPaRCNet and DINO-EEG too, each against its own clean baseline; results carry a `detector` column. Cache
+  moved to `perturbations/<detector>/<condition>/` (eventNet's existing outputs moved, not recomputed). Checked on
+  PN00-1 × `disconnected_focus_severe`: all 4 run (per 44 min recording: Gotman 4 s, SPaRCNet 1 s, DINO-EEG 16 s).
+
+### 2026-11-08 · same SzCORE input for all detectors; error survival through preprocessing
+- **Pipeline:** SPaRCNet and DINO-EEG built their montages straight from the referential signal; now, like eventNet and
+  Gotman, they receive the SzCORE-format EEG (official conversion, after error injection; see Pipeline). Their bipolar
+  montages cancel the common average, so their model input changes by only 0.2–0.3% RMS (extra 256 Hz resampling
+  step; PN00-1). Clean baselines being recomputed; old outputs in `data/cache/002-seizure-robustness/backup_pre_szcore_input/`.
+- **60 Hz notch kept** as released (option A, see Pipeline note).
+- **Test 2s** (`preprocessing_survival.py`, 9 recordings, median `survival_db`; 0 = reaches the model at full strength):
+
+  | Error | eventNet | Gotman | SPaRCNet | DINO-EEG |
+  |---|---|---|---|---|
+  | mains | −2.1 | +3.2 | **−24.1** (40 Hz low-pass removes it) | +4.0 to +4.7 |
+  | impedance | −5.4 | +0.8 | +3.9 | +2.1 |
+  | disconnected (random 1 / 3 / 5) | +0.4 / +3.0 / +2.5 | +2.5 / +5.7 / +5.7 | +3.0 / +5.3 / +5.3 | +2.9 / +6.4 / +6.4 |
+  | muscle | +0.4 | +2.6 | +5.3 | +4.5 |
+  | displacement | +1.7 | +2.0 | +1.4 to +1.8 | +2.4 |
+
+  - Only SPaRCNet's preprocessing removes an error (mains). Everything else reaches every model at full strength or
+    stronger: bipolar derivations cancel EEG shared by neighbouring electrodes but not the error, so relative to the
+    signal the error grows by 2–6 dB (Gotman, SPaRCNet, DINO-EEG). The common average (eventNet) dilutes it slightly.
+  - Survival does not depend on the level (filters and montages are linear), except where pyprep steps in.
+  - DINO-EEG's pyprep interpolates the mains electrodes in 7/9 recordings at `mains_severe` (1/9 moderate) and an
+    impedance electrode in 1/9. Interpolation replaces the electrode's EEG with its neighbours', so the input moves
+    further from clean (+6.5 dB), not closer. It never catches a disconnected electrode (0/9 at every level): after
+    the common average a flat electrode is no longer flat. So DINO-EEG does not "repair" disconnections.
+  - The expected table (before measuring) was wrong for muscle and impedance on SPaRCNet: its 0.5–40 Hz band-pass
+    removes part of the error, but just as much of the EEG, so relative to what the model sees they are not reduced.
+- **Reverted the same day:** SzCORE input only for eventNet and Gotman (the detectors whose official code takes it);
+  SPaRCNet and DINO-EEG back on the referential signal, as their official scripts. Reason: with SzCORE input, DINO-EEG's
+  pyprep never caught a disconnected electrode (above), which is a side effect of our conversion, not of DINO-EEG.
+  Gotman is now exactly the official algorithm: input (SzCORE → 18-ch double banana), thresholds (prominence 10 µV,
+  not 1 µV; period 0.025–0.150 s), window loop, cross-channel rule, and no ≥ 3 s minimum event length. The old
+  departures had no documented reason. Output is sample-identical to the official code (transcribed) on 7 recordings;
+  clean SzCORE score there: 7/7 seizures, 274 false alarms/24 h.
+  The DINO-EEG column of Test 2s above was measured with SzCORE input and must be rerun. All prediction caches deleted
+  (`backup_pre_szcore_input/` kept).
+
+### 2026-11-08 · notch: 50 Hz considered, 60 Hz kept
+- Considered moving SPaRCNet and DINO-EEG to a 50 Hz notch (Siena mains). Rejected: the study is about the
+  technician's role, so detectors stay fixed tools, run as released (see Pipeline note). With a 50 Hz notch, a
+  synthetic 50 µV peak 50 Hz error would leave 0.24 µV RMS after DINO-EEG preprocessing (−43 dB), i.e. the mains
+  test would be trivial for it.

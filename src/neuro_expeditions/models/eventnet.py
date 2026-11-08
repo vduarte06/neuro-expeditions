@@ -2,8 +2,8 @@
 
 Thin wrapper around the official SzCORE package `eventnet` (github.com/esl-epfl/eventnet_2024, pinned commit
 d138668, installed via pyproject). Everything model-related is the official code:
-    - preprocessing: `epilepsy2bids` `Eeg.standardize` (19 10-20 electrodes, 256 Hz via resampy, common average),
-      i.e. the SzCORE format the model is run on;
+    - preprocessing: `neuro_expeditions.szcore.to_szcore` = `epilepsy2bids` `Eeg.standardize` (19 10-20
+      electrodes, 256 Hz via resampy, common average), i.e. the SzCORE format the model is run on;
     - model + weights: `eventnet.utils.load_model`;
     - windowing: `eventnet.utils.SeizureDataset` (120 s windows, shorter for short recordings, as in `main`);
     - events: `eventnet.utils.events_to_mask` (threshold 0.44, as in `main`).
@@ -20,13 +20,12 @@ import mne
 import numpy as np
 import pandas as pd
 import torch
-from epilepsy2bids.eeg import Eeg
 from eventnet import utils
 
-FS = 256
+from neuro_expeditions.szcore import to_szcore
+
 THRESHOLD = 0.44
 WINDOW_SEC = 120
-MODERN_TO_OLD = {"T7": "T3", "T8": "T4", "P7": "T5", "P8": "T6"}
 COLUMNS = ["onset_sec", "offset_sec", "duration_sec", "confidence", "label"]
 
 
@@ -38,15 +37,6 @@ def default_device() -> str:
 
 def load_model(device: str | None = None) -> torch.nn.Module:
     return utils.load_model().to(device or default_device()).eval()
-
-
-def to_szcore(raw: mne.io.Raw) -> Eeg:
-    """mne.Raw -> official SzCORE-standardised Eeg (19 channels, uV, 256 Hz, common average)."""
-    names = {MODERN_TO_OLD.get(c, c).lower(): c for c in raw.ch_names}
-    picks = [names[e.lower()] for e in Eeg.ELECTRODES_10_20]
-    eeg = Eeg(raw.get_data(picks=picks, units="uV"), list(Eeg.ELECTRODES_10_20), int(raw.info["sfreq"]))
-    eeg.standardize(FS, list(Eeg.ELECTRODES_10_20), "Avg")
-    return eeg
 
 
 def mask_to_events(mask: np.ndarray, fs: float) -> pd.DataFrame:

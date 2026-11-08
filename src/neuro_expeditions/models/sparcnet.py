@@ -3,7 +3,9 @@
 Multi-scale 1D DenseNet trained on extensive ICU and EMU scalp EEG records for detecting
 seizures and periodic patterns across the Ictal-Interictal-Injury Continuum (IIIC).
 
-Input: 16-channel standard bipolar double-banana montage at 200 Hz.
+Input: 16-channel standard bipolar double-banana montage at 200 Hz, in uV, built straight from the referential
+19-channel signal as in the official `runSPaRCNet.py` (no SzCORE conversion: the bipolar montage cancels any common
+reference, so it would only add a resampling step); see `preprocess`.
 Output: 6-class continuum probabilities (Seizure, LPD, GPD, LRDA, GRDA, Other).
 
 Reference:
@@ -268,6 +270,12 @@ def derive_bipolar_montage(raw: mne.io.Raw) -> np.ndarray:
     return np.clip(bipolar, -500, 500).astype(np.float32)
 
 
+def preprocess(raw: mne.io.Raw) -> np.ndarray:
+    """Model input (16, n) from a referential mne.Raw, as the official `runSPaRCNet.py`: 200 Hz, 16 bipolar channels
+    (uV), 60 Hz notch, 0.5-40 Hz band-pass, clip +-500 uV."""
+    return derive_bipolar_montage(raw)
+
+
 def detect(
     raw: mne.io.Raw,
     model: DenseNetClassifier | None = None,
@@ -283,7 +291,7 @@ def detect(
     if model is None:
         model = load_model(device=device)
 
-    bipolar_data = derive_bipolar_montage(raw)  # (16, n_samples)
+    bipolar_data = preprocess(raw)  # (16, n_samples)
     n_samples = bipolar_data.shape[1]
     win_len = int(window_sec * SFREQ)
     stride = int(stride_sec * SFREQ)

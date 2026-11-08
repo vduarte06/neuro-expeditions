@@ -113,8 +113,9 @@ def main() -> None:
     args = ap.parse_args()
     patients = GOOD_PATIENTS if args.cohort == "good" else siena.SUBJECTS
     recordings = [r for r in siena.list_recordings() if siena.patient_id(r) in patients]
-    conditions = ["clean"] + sorted(p.name for p in (CACHE / "perturbations").iterdir() if p.is_dir())
-    folder = lambda c: CACHE / "clean" / "eventnet" if c == "clean" else CACHE / "perturbations" / c  # noqa: E731
+    # eventNet outputs of run_perturbations.py (cache layout perturbations/<detector>/<condition>/)
+    conditions = ["clean"] + sorted(p.name for p in (CACHE / "perturbations" / "eventnet").iterdir() if p.is_dir())
+    folder = lambda c: CACHE / "clean" / "eventnet" if c == "clean" else CACHE / "perturbations" / "eventnet" / c  # noqa: E731
 
     rows = []
     for edf in recordings:

@@ -8,8 +8,9 @@ Weights: https://zenodo.org/records/19159105 (CC BY 4.0, 2.6 GB). Code: https://
 cloned to data/external/DINO-EEG (commit 60da643). Its compiled CUDA attention op is replaced by a pure-PyTorch
 equivalent (models/_msda_pytorch.py), so it runs on CPU / Apple MPS.
 
-Preprocessing mirrors the official `run_edf_to_tcp_predictions.py`, but starts from an mne.Raw (so signals can be
-perturbed first): 200 Hz, 60 Hz notch, 0.1-70 Hz band-pass, bad-channel detection + interpolation (pyprep),
+Input: the referential 19-channel mne.Raw (volts), as the official `run_edf_to_tcp_predictions.py` reads the EDF, so
+that signals can be perturbed first. No SzCORE conversion: its common average would hide flat (disconnected)
+electrodes from pyprep's bad-channel detection. Then the official preprocessing: 200 Hz, 60 Hz notch, 0.1-70 Hz band-pass, bad-channel detection + interpolation (pyprep),
 TCP bipolar montage, STFT (1 s window), per-time-step normalisation. The 60 Hz notch is the released setting
 (TUSZ is US data), kept as is.
 
@@ -58,6 +59,35 @@ def _runner():
     return module
 
 
+def preprocess(raw: mne.io.Raw, r=None, detect_bad_channels: bool = True) -> tuple[dict[str, np.ndarray], list[str]]:
+    """Signal preprocessing up to the TCP bipolar montage (before the STFT), as the detector runs it.
+
+    Returns ({'FP1-F7': (1, n) array, ...}, bad channels found and interpolated, in the official old names).
+    """
+    r = r or _runner()
+    raw = raw.copy()
+    raw.rename_channels({c: MODERN_TO_OLD.get(c, c) for c in raw.ch_names})
+    r.pick_channels(raw)
+    raw.set_montage(r.get_montage())
+    if raw.info["sfreq"] != r.FREQUENCY:
+        raw.resample(r.FREQUENCY, verbose="error")
+    raw.notch_filter(60, verbose="error")
+    raw.filter(0.1, 70, verbose="error")
+    bads: list[str] = []
+    if detect_bad_channels and r.NoisyChannels is not None:
+        try:
+            nd = r.NoisyChannels(raw, do_detrend=True)
+            nd.find_bad_by_deviation()
+            nd.find_bad_by_nan_flat()
+            bads = list(nd.get_bads())
+            raw.info["bads"] = bads
+            if bads:
+                raw.interpolate_bads(verbose="error")
+        except Exception:
+            pass
+    return r.rereference(raw), bads
+
+
 class DinoEEG:
     def __init__(self, device: str | None = None, threshold: float = THRESHOLD, detect_bad_channels: bool = True):
         self.r = _runner()
@@ -96,26 +126,8 @@ class DinoEEG:
 
     def _write_inputs(self, raw: mne.io.Raw, name: str, root: Path) -> list[dict]:
         r = self.r
-        raw = raw.copy()
-        raw.rename_channels({c: MODERN_TO_OLD.get(c, c) for c in raw.ch_names})
-        r.pick_channels(raw)
-        raw.set_montage(r.get_montage())
-        if raw.info["sfreq"] != r.FREQUENCY:
-            raw.resample(r.FREQUENCY, verbose="error")
-        raw.notch_filter(60, verbose="error")
-        raw.filter(0.1, 70, verbose="error")
-        if self.detect_bad_channels and r.NoisyChannels is not None:
-            try:
-                nd = r.NoisyChannels(raw, do_detrend=True)
-                nd.find_bad_by_deviation()
-                nd.find_bad_by_nan_flat()
-                raw.info["bads"] = list(nd.get_bads())
-                if raw.info["bads"]:
-                    raw.interpolate_bads(verbose="error")
-            except Exception:
-                pass
-        signals = r.rereference(raw)
-        duration = raw.n_times / r.FREQUENCY
+        signals, _ = preprocess(raw, r, self.detect_bad_channels)
+        duration = raw.n_times / raw.info["sfreq"]
         names = list(signals)
         spec = r.apply_batch_stft_and_transform(np.concatenate([signals[c] for c in names], axis=0))
 

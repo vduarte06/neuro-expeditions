@@ -337,12 +337,13 @@ def load_exam_raw(
         for mod in target_models:
             _add_prediction_annotations(raw, cache_root / "clean" / mod / f"{edf_stem}.tsv", f"{mod}_pred")
         if perturbation:
-            # run_perturbations.py caches eventNet detections on the perturbed signal here
-            _add_prediction_annotations(
-                raw,
-                cache_root / "perturbations" / perturbation / f"{edf_stem}.tsv",
-                "eventnet_perturbed_pred",
-            )
+            # run_perturbations.py caches each detector's events on the perturbed signal here
+            for mod in target_models:
+                _add_prediction_annotations(
+                    raw,
+                    cache_root / "perturbations" / mod / perturbation / f"{edf_stem}.tsv",
+                    f"{mod}_perturbed_pred",
+                )
 
     # Optional re-referencing
     if montage.lower() == "average":
