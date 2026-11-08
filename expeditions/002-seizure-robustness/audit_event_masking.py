@@ -8,7 +8,7 @@ Re-scores the cached eventNet predictions of run_perturbations.py (no detector i
       that persist (each clean detection matched to the perturbed detection it overlaps most).
 "Masked" = event F1 identical to clean while detections moved or appeared/disappeared.
 
-    python audit_event_masking.py                # good-patient subset
+    python audit_event_masking.py                # included-patient subset
     python audit_event_masking.py --cohort all
 
 Outputs (results/masking_audit/<cohort>_patients/): masking_by_condition.csv, masking_by_recording.csv
@@ -27,7 +27,7 @@ from timescoring.annotations import Annotation
 from evaluate_detectors import SZCORE, _duration, to_mask
 from neuro_expeditions import DATA_DIR
 from neuro_expeditions.datasets import siena
-from run_perturbations import GOOD_PATIENTS
+from run_perturbations import INCLUDED_PATIENTS
 
 HERE = Path(__file__).parent
 CACHE = DATA_DIR / "cache" / "002-seizure-robustness"
@@ -109,9 +109,9 @@ def summarise(df: pd.DataFrame) -> pd.DataFrame:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cohort", choices=["good", "all"], default="good")
+    ap.add_argument("--cohort", choices=["included", "all"], default="included")
     args = ap.parse_args()
-    patients = GOOD_PATIENTS if args.cohort == "good" else siena.SUBJECTS
+    patients = INCLUDED_PATIENTS if args.cohort == "included" else siena.SUBJECTS
     recordings = [r for r in siena.list_recordings() if siena.patient_id(r) in patients]
     # eventNet outputs of run_perturbations.py (cache layout perturbations/<detector>/<condition>/)
     conditions = ["clean"] + sorted(p.name for p in (CACHE / "perturbations" / "eventnet").iterdir() if p.is_dir())

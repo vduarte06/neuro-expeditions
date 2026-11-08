@@ -2,8 +2,8 @@
 """Run the acquisition-error perturbations on whole recordings for one or more detectors, vs their clean baseline.
 
 Usage (assumes poetry shell inside expeditions/002-seizure-robustness):
-    python run_perturbations.py                    # eventNet, good-patient subset -> results/perturbations/good_patients/
-    python run_perturbations.py --detectors gotman,sparcnet          # same 19 conditions, other detectors
+    python run_perturbations.py                    # eventNet, included-patient subset -> results/perturbations/included_patients/
+    python run_perturbations.py --detectors gotman,sparcnet          # same 10 core conditions, other detectors
     python run_perturbations.py --detectors all                      # gotman, eventnet, sparcnet, dinoeeg
     python run_perturbations.py --cohort all       # all 14 patients     -> results/perturbations/all_patients/
     python run_perturbations.py --variations mains_severe,impedance_mild
@@ -46,8 +46,7 @@ from evaluate_detectors import DETECTORS, get_detector
 from neuro_expeditions import DATA_DIR
 from neuro_expeditions.datasets import siena
 from neuro_expeditions.perturbations import (
-    FOCUS_VARIATIONS,
-    VARIATIONS_CATALOG,
+    CORE_VARIATIONS,
     apply_variation,
     get_variation,
     list_variations,
@@ -60,10 +59,11 @@ CACHE_DIR = DATA_DIR / "cache" / "002-seizure-robustness" / "perturbations"  # <
 CLEAN_CACHE_DIR = DATA_DIR / "cache" / "002-seizure-robustness" / "clean"  # <detector>/<rec>.tsv (evaluate_detectors)
 RESULTS_DIR = Path(__file__).resolve().parent / "results" / "perturbations"
 
-# Baseline cohort ("good patients"). Inclusion criteria (README / TESTS.md): temporal seizure localization and at
-# least 2 seizures. This list is the earlier working list, chosen from eventNet's first clean baseline (24/28 seizures
-# detected) before the criteria were written down; it is used by run_extended_tests.py and audit_event_masking.py too.
-GOOD_PATIENTS = ["PN00", "PN01", "PN05", "PN09", "PN12", "PN13", "PN14", "PN16", "PN17"]
+# Baseline cohort ("included patients"): the patients meeting the inclusion criteria (README / TESTS.md), temporal seizure
+# localization (subject_info.csv) and at least 2 seizures. 11 patients, 111 h, 35 seizures. Set on 2026-11-08; it
+# replaces an earlier list of 9 chosen from eventNet's first baseline (without PN03, PN06), which favoured eventNet.
+# Used by run_extended_tests.py, audit_event_masking.py and preprocessing_survival.py too.
+INCLUDED_PATIENTS = ["PN00", "PN01", "PN03", "PN05", "PN06", "PN09", "PN12", "PN13", "PN14", "PN16", "PN17"]
 
 SZCORE_PARAMS = scoring.EventScoring.Parameters(
     toleranceStart=30,
@@ -147,17 +147,17 @@ def main() -> None:
     )
     parser.add_argument(
         "--cohort",
-        choices=["good", "all"],
-        default="good",
-        help="good: the 9 GOOD_PATIENTS (default); all: all 14 Siena patients. Results go to "
+        choices=["included", "all"],
+        default="included",
+        help="included: the 11 INCLUDED_PATIENTS (default); all: all 14 Siena patients. Results go to "
              "results/perturbations/<cohort>_patients/.",
     )
     parser.add_argument(
         "--variations",
         default="",
-        help="Comma-separated list of variations to evaluate (default: the 15 benchmark variations, 5 error types x "
-             "mild/moderate/severe, plus the 4 disconnected focus/contra variations; extra variations can be "
-             "named here too).",
+        help="Comma-separated list of variations to evaluate (default: CORE_VARIATIONS, the 10 core conditions, 5 "
+             "error types x mild/severe; the moderate levels, the 4 disconnected focus/contra variations and the "
+             "extra variations can be named here).",
     )
     parser.add_argument(
         "--patients",
@@ -200,14 +200,14 @@ def main() -> None:
         target_patients = [p.strip() for p in args.patients.split(",") if p.strip()]
         results_dir = RESULTS_DIR / "custom_patients"
     else:
-        target_patients = GOOD_PATIENTS if args.cohort == "good" else siena.SUBJECTS
+        target_patients = INCLUDED_PATIENTS if args.cohort == "included" else siena.SUBJECTS
         results_dir = RESULTS_DIR / f"{args.cohort}_patients"
     if args.variations:
         target_variations = [v.strip() for v in args.variations.split(",") if v.strip()]
         for v in target_variations:
             get_variation(v)  # fail early on a typo
     else:
-        target_variations = list(VARIATIONS_CATALOG) + list(FOCUS_VARIATIONS)
+        target_variations = list(CORE_VARIATIONS)
 
     all_recordings = siena.list_recordings()
     recordings = [r for r in all_recordings if siena.patient_id(r) in target_patients]

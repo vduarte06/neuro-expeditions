@@ -20,14 +20,14 @@ detectors, and does that impact differ between a classical method and a deep lea
 **Study type.** Experimental, quantitative, secondary public data, paired design: each recording is its own
 control (clean vs perturbed).
 
-**Inclusion criteria (baseline cohort, "good patients").**
+**Inclusion criteria (baseline cohort, "included patients").**
 - **Temporal seizure localization:** 13 of the 14 patients are temporal, so this makes the cohort clinically
   homogeneous. Only PN10 (frontal, bilateral FBTC) is excluded by it.
 - **At least 2 seizures:** a baseline needs more than one event per patient to see variation between patients.
 
-The runs started on 2026-11-07 use an earlier working list (`GOOD_PATIENTS` in `run_perturbations.py`, chosen from
-eventNet's first baseline before these criteria were written down). Every perturbation test is also run on all 14
-patients. Details per test: [TESTS.md](TESTS.md).
+These criteria give 11 patients (PN00, PN01, PN03, PN05, PN06, PN09, PN12, PN13, PN14, PN16, PN17; 111 h, 35 seizures),
+set as `INCLUDED_PATIENTS` in `run_perturbations.py` on 2026-11-08. It replaces an earlier list of 9 chosen from eventNet's
+first baseline before the criteria were written down, which left out PN03 and PN06 and so favoured eventNet (H2). Details per test: [TESTS.md](TESTS.md).
 
 ## Setup
 | | |
@@ -48,8 +48,8 @@ preprocessing → model → detections (.tsv) → SzCORE evaluation
 Each detector gets the input format its official code expects. eventNet and Gotman: the SzCORE format (official
 epilepsy2bids conversion: 256 Hz, common average, µV); eventNet was trained on it and the official Gotman baseline
 reads it. SPaRCNet and DINO-EEG: the referential signal, as their official scripts read it. Their bipolar montages
-cancel any common reference, so SzCORE conversion would only add a resampling step for SPaRCNet, and for DINO-EEG it
-would hide flat electrodes from pyprep (see 2026-11-08). Errors are injected **before** any conversion, on the
+cancel any common reference, so SzCORE conversion would add nothing but a resampling step for them, and an extra
+re-referencing before DINO-EEG's pyprep that its official pipeline does not have. Errors are injected **before** any conversion, on the
 electrodes, because that is where acquisition errors happen: a disconnected electrode is flat in the referential
 signal, not in a derived channel, and a faulty electrode leaks into the common average.
 
@@ -76,19 +76,23 @@ study and should be shown explicitly (clean vs perturbed signal on one electrode
 | Muscle artefact | 20–100 Hz bursts, 10% of the time, synchronous | F7, F8, T3–T6 | 20 µV RMS | 50 µV RMS | 100 µV RMS |
 | Electrode displacement | mix with neighbouring electrode | 2 random | α 0.25 | α 0.50 | α 0.75 |
 
-5 error types × 3 levels = 15 conditions + clean baseline, per recording, per detector. Plus 4 targeted
-disconnection conditions: flat mid-temporal electrode (mild) or temporal chain (severe) over the seizure focus, and
-the same electrodes on the other side as control. Full definitions: [TESTS.md](TESTS.md) test 2 and
+**Core run (default since 2026-11-08, to cut compute):** 5 error types × mild and severe = 10 conditions + clean
+baseline, per recording, per detector (`CORE_VARIATIONS`). The moderate level and 4 targeted disconnection conditions
+(flat mid-temporal electrode or temporal chain over the seizure focus, and the same electrodes on the other side as
+control) are defined but run only on request (`--variations`); seizure side is covered by the `side` suite of
+`run_extended_tests.py` instead. The `acquisition` and `timing` suites are postponed (acquisition repeats these
+conditions on seizure windows only). Full definitions: [TESTS.md](TESTS.md) test 2 and
 `src/neuro_expeditions/perturbations.py`.
 
 ## Open items
 - **Primary outcome:** the design text was cut off at "Variáveis de resultado". Pick the primary metric (event F1?).
 - **Statistical analysis:** paired per-recording differences vs clean (Wilcoxon, or a mixed model with patient as
-  random effect) for H1, detector × condition interaction for H2, correction across 15 conditions.
+  random effect) for H1, detector × condition interaction for H2, correction across the 10 core conditions.
 - **SPaRCNet event rule:** the official code only outputs a probability per 10 s window. Our rule (any window
   ≥ 0.5) is likely why it raises ~140 false alarms/24 h. Needs a justified rule (smoothing, consecutive windows).
-- **DINO-EEG defaults:** fixed 60 Hz notch (Siena mains is 50 Hz) and automatic bad-channel interpolation (pyprep),
-  which may undo "disconnected electrode" perturbations. Decide: part of the detector, or switched off.
+- **DINO-EEG defaults:** fixed 60 Hz notch (Siena mains is 50 Hz) and automatic bad-channel interpolation (pyprep).
+  Kept as released (detectors are fixed tools). pyprep does not undo our "disconnected electrode" errors: its flat
+  test needs a channel SD below 1e-15 V, and our flat line has a 0.5 µV noise floor, as a real loose electrode would.
 - **Gotman:** now exactly the official `esl-epfl/gotman_1982` (2026-11-08); the results below predate this and must
   be rerun.
 - **Random seeds:** one fixed draw per recording × error type (decided 2026-11-07); several repeats still open.
@@ -158,7 +162,7 @@ outside this study's protocol.
   electrodes and noise (only intensity changes), the 1 / 3 / 5 disconnected electrodes are nested, and the electrodes
   used are written to `metrics_by_recording.csv`.
 - **Disconnected over the focus:** random disconnection rarely hits the seizure side (temporal electrodes over the
-  focus in 5/26, 9/26, 13/26 good-patient recordings at mild / moderate / severe), so it cannot show a location
+  focus in 5/26, 9/26, 13/26 included-patient recordings at mild / moderate / severe), so it cannot show a location
   effect. Added `disconnected_focus_mild|severe` (T7/T8, or F7-T7-P7 / F8-T8-P8, on the seizure side from
   `subject_info.csv`) and `disconnected_contra_mild|severe` (same electrodes, other side). They report three
   numbers: typical cost of a failed electrode (random), worst case (focus), and the part due to location (focus vs
@@ -196,13 +200,15 @@ outside this study's protocol.
   - Survival does not depend on the level (filters and montages are linear), except where pyprep steps in.
   - DINO-EEG's pyprep interpolates the mains electrodes in 7/9 recordings at `mains_severe` (1/9 moderate) and an
     impedance electrode in 1/9. Interpolation replaces the electrode's EEG with its neighbours', so the input moves
-    further from clean (+6.5 dB), not closer. It never catches a disconnected electrode (0/9 at every level): after
-    the common average a flat electrode is no longer flat. So DINO-EEG does not "repair" disconnections.
+    further from clean (+6.5 dB), not closer. It never catches a disconnected electrode (0/9 at every level), so DINO-EEG does not
+    "repair" disconnections. (Corrected 2026-11-08: the cause is pyprep's flat threshold, SD < 1e-15 V, far below our
+    0.5 µV noise floor; it does not catch them on the referential signal either. Checked on PN12-3.)
   - The expected table (before measuring) was wrong for muscle and impedance on SPaRCNet: its 0.5–40 Hz band-pass
     removes part of the error, but just as much of the EEG, so relative to what the model sees they are not reduced.
 - **Reverted the same day:** SzCORE input only for eventNet and Gotman (the detectors whose official code takes it);
-  SPaRCNet and DINO-EEG back on the referential signal, as their official scripts. Reason: with SzCORE input, DINO-EEG's
-  pyprep never caught a disconnected electrode (above), which is a side effect of our conversion, not of DINO-EEG.
+  SPaRCNet and DINO-EEG back on the referential signal, as their official scripts. Reason: run each detector on the input
+  its official code expects. (The first reason given, that SzCORE input hid flat electrodes from pyprep, was wrong:
+  pyprep misses them on the referential signal too; see the correction above.)
   Gotman is now exactly the official algorithm: input (SzCORE → 18-ch double banana), thresholds (prominence 10 µV,
   not 1 µV; period 0.025–0.150 s), window loop, cross-channel rule, and no ≥ 3 s minimum event length. The old
   departures had no documented reason. Output is sample-identical to the official code (transcribed) on 7 recordings;

@@ -20,10 +20,10 @@ SPaRCNet = referential -> 16 bipolar, 200 Hz, 60 Hz notch, 0.5-40 Hz, clip +-500
 Each recording is perturbed as a whole (as in run_perturbations.py) and then analysed on a segment around its first
 seizure (default 600 s, so it contains the seizure). DINO-EEG's pyprep runs on that segment, not on its usual 1 h chunk.
 
-    python preprocessing_survival.py                          # first seizure recording of each good patient, all 19
+    python preprocessing_survival.py                          # first seizure recording of each included patient, 10 core conditions
     python preprocessing_survival.py --recordings PN00-1 --variations mains_severe,disconnected_focus_severe
 
-Outputs (results/preprocessing_survival/<good_patients|custom>/):
+Outputs (results/preprocessing_survival/<included_patients|custom>/):
     survival_by_recording.csv   one row per recording x condition x detector
     survival_summary.csv        medians over recordings per condition x detector
 """
@@ -46,14 +46,13 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 from neuro_expeditions.datasets import siena
 from neuro_expeditions.models import dinoeeg, gotman, sparcnet
 from neuro_expeditions.perturbations import (
-    FOCUS_VARIATIONS,
-    VARIATIONS_CATALOG,
+    CORE_VARIATIONS,
     apply_variation,
     get_variation,
     variation_electrodes,
 )
 from neuro_expeditions.szcore import to_szcore
-from run_perturbations import GOOD_PATIENTS
+from run_perturbations import INCLUDED_PATIENTS
 
 RESULTS = Path(__file__).resolve().parent / "results" / "preprocessing_survival"
 DETECTORS = ("eventnet", "gotman", "sparcnet", "dinoeeg")
@@ -92,8 +91,8 @@ def segment(edf: Path, length: float, duration: float) -> tuple[float, float]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--recordings", default="", help="comma-separated, e.g. PN00-1,PN01-1 "
-                    "(default: the first recording with a seizure of each good patient)")  # fmt: skip
-    ap.add_argument("--variations", default="", help="comma-separated (default: the 15 grid + 4 focus conditions)")
+                    "(default: the first recording with a seizure of each included patient)")  # fmt: skip
+    ap.add_argument("--variations", default="", help="comma-separated (default: the 10 core conditions, CORE_VARIATIONS)")
     ap.add_argument("--segment-sec", type=float, default=600.0)
     args = ap.parse_args()
 
@@ -104,13 +103,13 @@ def main() -> None:
         out_dir = RESULTS / "custom"
     else:
         recordings = []
-        for p in GOOD_PATIENTS:
+        for p in INCLUDED_PATIENTS:
             first = next((r for r in all_recs if siena.patient_id(r) == p and siena.load_seizures(r)), None)
             if first is not None:
                 recordings.append(first)
-        out_dir = RESULTS / "good_patients"
+        out_dir = RESULTS / "included_patients"
     variations = ([v.strip() for v in args.variations.split(",") if v.strip()] if args.variations
-                  else list(VARIATIONS_CATALOG) + list(FOCUS_VARIATIONS))  # fmt: skip
+                  else list(CORE_VARIATIONS))  # fmt: skip
     for v in variations:
         get_variation(v)
     out_dir.mkdir(parents=True, exist_ok=True)

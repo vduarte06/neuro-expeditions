@@ -20,8 +20,8 @@ Suites:
     python run_extended_tests.py --suite electrode_map --cohort all
     python run_extended_tests.py --list
 
---cohort good = the baseline cohort, patients meeting the inclusion criteria (temporal seizure localization, at least
-2 seizures; see README), currently the working list GOOD_PATIENTS in run_perturbations.py. --cohort all = all 14.
+--cohort included = the baseline cohort, patients meeting the inclusion criteria (temporal seizure localization, at least
+2 seizures; see README), INCLUDED_PATIENTS in run_perturbations.py (11 patients). --cohort all = all 14.
 
 Predictions are cached per condition x detector x window (data/cache/002-seizure-robustness/extended/), shared
 between cohorts. Outputs (results/extended/<cohort>_patients/):
@@ -55,7 +55,7 @@ from neuro_expeditions.perturbations import (
     perturb_electrode_displacement,
     perturb_high_impedance,
 )
-from run_perturbations import GOOD_PATIENTS
+from run_perturbations import INCLUDED_PATIENTS
 
 HERE = Path(__file__).parent
 CACHE = DATA_DIR / "cache" / "002-seizure-robustness" / "extended"
@@ -276,7 +276,7 @@ def stats(suite: str, df: pd.DataFrame, detectors: list[str]) -> pd.DataFrame:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--suite", choices=list(SUITES))
-    ap.add_argument("--cohort", choices=["good", "all"], default="good")
+    ap.add_argument("--cohort", choices=["included", "all"], default="included")
     ap.add_argument("--detectors", default=",".join(DETECTORS))
     ap.add_argument("--score-only", action="store_true")
     ap.add_argument("--list", action="store_true", help="list the conditions of every suite and exit")
@@ -286,7 +286,7 @@ def main() -> None:
             print(f"{s} ({len(conds)}): {', '.join(conds)}")
         return
     detectors = [d.strip() for d in args.detectors.split(",")]
-    patients = GOOD_PATIENTS if args.cohort == "good" else siena.SUBJECTS
+    patients = INCLUDED_PATIENTS if args.cohort == "included" else siena.SUBJECTS
     recordings = [r for r in siena.list_recordings()
                   if siena.patient_id(r) in patients and siena.load_seizures(r)]  # fmt: skip
     sides = lateralization()

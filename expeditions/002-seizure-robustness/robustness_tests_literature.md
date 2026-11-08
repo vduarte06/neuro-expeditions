@@ -82,7 +82,7 @@ curl).
 
 **Compute unit (U):** one condition on the 9-patient ~76 h subset with eventNet ≈ 15 min. The full 141 h cohort is ≈ 28
 min. DINO-EEG ≈ 3–4 U. SPaRCNet and Gotman ≤ 1 U (not timed). **Seizure-centred windows** (each seizure ±15 min) are
-about 14 h for the 28 good-patient seizures, so ≈ 3 min/condition for eventNet. Use them when only recall/latency
+about 14 h for the 28 included-patient seizures, so ≈ 3 min/condition for eventNet. Use them when only recall/latency
 matter.
 
 **What the two closest recent papers already did.** These overlap checks recur in the tests below.
@@ -137,7 +137,7 @@ matter.
 - **Procedure:** 13/14 patients are temporal (9 L, 4 R). PN10 is frontal-bilateral, so exclude it or analyse it
   separately. For each patient, apply flat, high-impedance and displacement errors to the 3 ipsilateral temporal
   electrodes vs the 3 contralateral ones, at one or two severities. The paired contrast is within-patient
-  (ipsi − contra). Use the 9 good patients for recall (7 L, 2 R).
+  (ipsi − contra). Use the 11 included patients for recall (8 L, 3 R).
 - **Metrics:** seizure-level detected/missed (paired McNemar, clean vs ipsi, ipsi vs contra), Δrecall, onset latency,
   ΔFA/24h. Mixed model `metric ~ side × detector + (1|patient)`.
 - **Compute:** 3 errors × 2 sides × 1–2 levels = 6–12 conditions ≈ 1.5–3 h eventNet, 4.5–12 h DINO-EEG. Seizure windows

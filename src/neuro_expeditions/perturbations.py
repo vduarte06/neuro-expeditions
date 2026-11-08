@@ -3,7 +3,8 @@
 Implements realistic electrode-level technical errors applied to referential (unipolar)
 raw EEG prior to downstream detector preprocessing and re-referencing.
 
-VARIATIONS_CATALOG is the benchmark grid: 5 error types x 3 severities (mild / moderate / severe).
+VARIATIONS_CATALOG is the benchmark grid: 5 error types x 3 severities (mild / moderate / severe). CORE_VARIATIONS
+(the default of the core runs) keeps mild and severe only.
 
     Error          Simulation                                Electrodes                  Mild     Moderate  Severe
     mains          50 Hz sinusoid, peak amplitude, same      3 random                    5 µV     20 µV     50 µV
@@ -554,6 +555,11 @@ FOCUS_VARIATIONS: dict[str, dict[str, Any]] = {
 
 ALL_VARIATIONS: dict[str, dict[str, Any]] = {**VARIATIONS_CATALOG, **FOCUS_VARIATIONS, **EXTRA_VARIATIONS}
 
+# Default set of the core runs (decided 2026-11-08 to cut compute): the 5 error types at the two ends of the
+# intensity range, mild and severe. The moderate levels and the focus/contra conditions stay available by name
+# (--variations); seizure side is covered by the `side` suite of run_extended_tests.py.
+CORE_VARIATIONS: list[str] = [name for name in VARIATIONS_CATALOG if not name.endswith("_moderate")]
+
 
 def get_variation(variation_name: str) -> dict[str, Any]:
     """Catalog entry of a benchmark or extra variation."""
@@ -639,8 +645,9 @@ def apply_variation(
 
 
 def list_variations(include_extra: bool = True) -> list[dict[str, str]]:
-    """Variation names and descriptions; 'set' is 'benchmark', 'focus' or 'extra'."""
-    rows = [{"name": k, "description": v["desc"], "set": "benchmark"} for k, v in VARIATIONS_CATALOG.items()]
+    """Variation names and descriptions; 'set' is 'core' (benchmark, run by default), 'benchmark', 'focus' or 'extra'."""
+    rows = [{"name": k, "description": v["desc"], "set": "core" if k in CORE_VARIATIONS else "benchmark"}
+            for k, v in VARIATIONS_CATALOG.items()]
     rows += [{"name": k, "description": v["desc"], "set": "focus"} for k, v in FOCUS_VARIATIONS.items()]
     if include_extra:
         rows += [{"name": k, "description": v["desc"], "set": "extra"} for k, v in EXTRA_VARIATIONS.items()]

@@ -9,8 +9,8 @@ cloned to data/external/DINO-EEG (commit 60da643). Its compiled CUDA attention o
 equivalent (models/_msda_pytorch.py), so it runs on CPU / Apple MPS.
 
 Input: the referential 19-channel mne.Raw (volts), as the official `run_edf_to_tcp_predictions.py` reads the EDF, so
-that signals can be perturbed first. No SzCORE conversion: its common average would hide flat (disconnected)
-electrodes from pyprep's bad-channel detection. Then the official preprocessing: 200 Hz, 60 Hz notch, 0.1-70 Hz band-pass, bad-channel detection + interpolation (pyprep),
+that signals can be perturbed first. No SzCORE conversion: the official pipeline has none, and its common average
+would add a re-referencing step before pyprep's bad-channel detection. Then the official preprocessing: 200 Hz, 60 Hz notch, 0.1-70 Hz band-pass, bad-channel detection + interpolation (pyprep),
 TCP bipolar montage, STFT (1 s window), per-time-step normalisation. The 60 Hz notch is the released setting
 (TUSZ is US data), kept as is.
 
