@@ -49,7 +49,9 @@ from evaluate_detectors import DETECTORS, SZCORE, get_detector, to_mask
 from neuro_expeditions import DATA_DIR
 from neuro_expeditions.datasets import siena
 from neuro_expeditions.perturbations import (
+    SIDE_TEMPORAL,
     VARIATIONS_CATALOG,
+    apply_side_variation,
     apply_variation,
     perturb_disconnected_electrode,
     perturb_electrode_displacement,
@@ -63,8 +65,8 @@ RESULTS = HERE / "results" / "extended"
 MARGIN_SEC = 15 * 60
 ICTAL_PAD_SEC = 30
 ELECTRODES = list(siena.CHANNELS_10_20.values())
-TEMPORAL = {"L": ["F7", "T7", "P7"], "R": ["F8", "T8", "P8"]}
-MEDIAL = {"F7": "F3", "T7": "C3", "P7": "P3", "F8": "F4", "T8": "C4", "P8": "P4"}
+TEMPORAL = SIDE_TEMPORAL
+ERROR_NAMES = {"flat": "flat", "impedance60uV": "impedance60uV", "displace50pct": "displace50pct"}
 
 
 def lateralization() -> dict[str, str]:
@@ -78,19 +80,13 @@ def lateralization() -> dict[str, str]:
 
 
 def _side_error(error: str, which: str):
+    """Same perturbation as the whole-recording side conditions (SIDE_VARIATIONS), applied to a window."""
+    name = f"side_{'ipsi' if which == 'ipsi' else 'contra'}_{ERROR_NAMES[error]}"
+
     def f(raw, ctx):
         if ctx["side"] not in TEMPORAL:
             return None
-        side = ctx["side"] if which == "ipsi" else {"L": "R", "R": "L"}[ctx["side"]]
-        chans = TEMPORAL[side]
-        if error == "flat":
-            return perturb_disconnected_electrode(raw, mode="flat", channels=chans)
-        if error == "impedance60uV":
-            return perturb_high_impedance(raw, noise_rms_uV=60.0, channels=chans)
-        out = raw
-        for ch in chans:  # displace each lateral electrode halfway towards its medial neighbour
-            out = perturb_electrode_displacement(out, mix_ratio=0.5, channel=ch, neighbor=MEDIAL[ch])
-        return out
+        return apply_side_variation(raw, name, recording=ctx.get("recording"), side=ctx["side"])
 
     return f
 

@@ -553,7 +553,71 @@ FOCUS_VARIATIONS: dict[str, dict[str, Any]] = {
                                    ("severe", "chain", "the temporal chain (F7, T7, P7 / F8, T8, P8)")]
 }  # fmt: skip
 
-ALL_VARIATIONS: dict[str, dict[str, Any]] = {**VARIATIONS_CATALOG, **FOCUS_VARIATIONS, **EXTRA_VARIATIONS}
+# Seizure-side conditions: the three temporal electrodes over the focus (ipsi) or the other hemisphere (contra).
+# Same definitions as the side suite of run_extended_tests.py, so whole-recording and peri-ictal results are the same
+# perturbation. Medial neighbours (not the 10-20 nearest neighbour) are used for the displacement, as in that suite.
+SIDE_TEMPORAL = {"L": ["F7", "T7", "P7"], "R": ["F8", "T8", "P8"]}
+SIDE_MEDIAL = {"F7": "F3", "T7": "C3", "P7": "P3", "F8": "F4", "T8": "C4", "P8": "P4"}
+SIDE_ERRORS = {
+    "flat": "flat line (disconnected electrode)",
+    "impedance60uV": "high-impedance noise, 60 uV RMS",
+    "displace50pct": "displacement, 50% towards the medial neighbour",
+}
+SIDE_VARIATIONS: dict[str, dict[str, Any]] = {
+    f"side_{hemisphere}_{error}": {
+        "group": "side",
+        "func": "side",
+        "side_error": error,
+        "hemisphere": hemisphere,  # 'ipsi' = seizure focus, 'contra' = other hemisphere
+        "n_electrodes": 3,
+        "params": {},
+        "desc": f"Seizure side, {hemisphere}: {SIDE_ERRORS[error]} on the 3 temporal electrodes",
+    }
+    for hemisphere in ("ipsi", "contra")
+    for error in SIDE_ERRORS
+}  # fmt: skip
+
+
+def side_electrodes(recording: str, hemisphere: str, ch_names: list[str], side: str | None = None) -> list[str]:
+    """Temporal electrodes (F7/T7/P7 or F8/T8/P8) of the focus ('ipsi') or the other side ('contra').
+
+    Empty when the patient has no left or right focus (PN10, bilateral).
+    """
+    if side is None:
+        from neuro_expeditions.datasets import siena
+
+        side = siena.seizure_side(recording)
+    if side not in SIDE_TEMPORAL:
+        return []
+    if hemisphere == "contra":
+        side = {"L": "R", "R": "L"}[side]
+    return [c for c in SIDE_TEMPORAL[side] if c in ch_names]
+
+
+def apply_side_variation(
+    raw: mne.io.Raw, variation_name: str, recording: str | None = None, side: str | None = None
+) -> mne.io.Raw:
+    """Apply a seizure-side condition (SIDE_VARIATIONS) to a whole recording or to a window."""
+    spec = SIDE_VARIATIONS[variation_name]
+    if side is None:
+        recording = recording or _recording_name(raw)
+    chans = side_electrodes(recording, spec["hemisphere"], raw.ch_names, side=side)
+    if not chans:
+        raise ValueError(f"{variation_name} does not apply to {recording}: no left or right seizure focus.")
+    error = spec["side_error"]
+    if error == "flat":
+        return perturb_disconnected_electrode(raw, mode="flat", channels=chans)
+    if error == "impedance60uV":
+        return perturb_high_impedance(raw, noise_rms_uV=60.0, channels=chans)
+    out = raw
+    for ch in chans:  # displace each electrode halfway towards its medial neighbour
+        out = perturb_electrode_displacement(out, mix_ratio=0.5, channel=ch, neighbor=SIDE_MEDIAL[ch])
+    return out
+
+
+ALL_VARIATIONS: dict[str, dict[str, Any]] = {
+    **VARIATIONS_CATALOG, **FOCUS_VARIATIONS, **SIDE_VARIATIONS, **EXTRA_VARIATIONS,
+}
 
 # Default set of the core runs (decided 2026-11-08 to cut compute): the 5 error types at the two ends of the
 # intensity range, mild and severe. The moderate levels and the focus/contra conditions stay available by name
@@ -590,6 +654,8 @@ def variation_electrodes(
     """
     spec = get_variation(variation_name)
     n = spec.get("n_electrodes")
+    if variation_name in SIDE_VARIATIONS:
+        return side_electrodes(recording, spec["hemisphere"], ch_names, side=side)
     if "hemisphere" in spec:
         if side is None:
             from neuro_expeditions.datasets import siena
@@ -627,6 +693,8 @@ def apply_variation(
     survives copy() and crop(). Raises ValueError if a focus variation does not apply (no left or right focus).
     """
     spec = get_variation(variation_name)
+    if variation_name in SIDE_VARIATIONS:
+        return apply_side_variation(raw, variation_name, recording=recording, side=side)
     func = PERTURBATION_FUNCTIONS[spec["func"]]
     if variation_name in EXTRA_VARIATIONS:
         return func(raw, **spec["params"])
@@ -649,6 +717,7 @@ def list_variations(include_extra: bool = True) -> list[dict[str, str]]:
     rows = [{"name": k, "description": v["desc"], "set": "core" if k in CORE_VARIATIONS else "benchmark"}
             for k, v in VARIATIONS_CATALOG.items()]
     rows += [{"name": k, "description": v["desc"], "set": "focus"} for k, v in FOCUS_VARIATIONS.items()]
+    rows += [{"name": k, "description": v["desc"], "set": "side"} for k, v in SIDE_VARIATIONS.items()]
     if include_extra:
         rows += [{"name": k, "description": v["desc"], "set": "extra"} for k, v in EXTRA_VARIATIONS.items()]
     return rows
