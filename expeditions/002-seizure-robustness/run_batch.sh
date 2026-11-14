@@ -18,11 +18,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-NAME="eventnet_dinoeeg-norej_floating"   # describes this batch; part of its folder name
-DETECTORS="eventnet,dinoeeg_norej"
+NAME="eventnet_dinoeeg_floating"   # describes this batch; part of its folder name
+DETECTORS="eventnet,dinoeeg"
 # stage name|extra arguments for run_perturbations.py (no --variations = the core conditions, CORE_VARIATIONS)
 STAGES=(
-  "1_disconnection|--variations disconnected_mild,disconnected_severe,floating_mild,floating_severe"
+  "1_floating|--variations floating_mild,floating_severe"
   "2_core|"
 )
 
@@ -85,8 +85,10 @@ case "${1:-}" in
   watch)
     log=$(current_log)
     [[ -n $log ]] || { echo "No stage log yet"; exit 1; }
-    echo "Following $log (the next stage writes a new log: run watch again then)"
-    tail -f "$log" | grep --line-buffered -E "progress|Running|FAILED|Recall"
+    echo "Following $log from the start (the next stage writes a new log: run watch again then)"
+    echo "The first [progress] / ETA line comes after the first detector run (model loading included: ~1-3 min)."
+    tail -n +1 -f "$log" | grep -a --line-buffered -E \
+      "To run|^  [a-z_]+ +[0-9.]+ h|^  total|nothing, everything|Loading|Running|event\(s\)|progress|FAILED|Recall"
     ;;
   stop)
     if running; then

@@ -73,10 +73,11 @@ study and should be shown explicitly (clean vs perturbed signal on one electrode
 | Mains interference | 50 Hz sinusoid, peak amplitude, same phase | 3 random | 5 µV | 20 µV | 50 µV |
 | High impedance | 0.5–70 Hz noise, SNR vs the electrode's own RMS | 2 random | 10 dB | 5 dB | 0 dB |
 | Disconnected electrode | flat signal | random, nested | 1 | 3 | 5 |
+| Floating electrode | lead come off: 50 Hz 200 µV + drift 100 µV RMS + noise, no EEG | same as disconnected | 1 | 3 | 5 |
 | Muscle artefact | 20–100 Hz bursts, 10% of the time, synchronous | F7, F8, T3–T6 | 20 µV RMS | 50 µV RMS | 100 µV RMS |
 | Electrode displacement | mix with neighbouring electrode | 2 random | α 0.25 | α 0.50 | α 0.75 |
 
-**Core run (default since 2026-11-08, to cut compute):** 5 error types × mild and severe = 10 conditions + clean
+**Core run (default since 2026-11-08, to cut compute):** 6 error types (floating added 2026-11-14) × mild and severe = 12 conditions + clean
 baseline, per recording, per detector (`CORE_VARIATIONS`). The moderate level and 4 targeted disconnection conditions
 (flat mid-temporal electrode or temporal chain over the seizure focus, and the same electrodes on the other side as
 control) are defined but run only on request (`--variations`); seizure side is covered by the `side` suite of
@@ -250,3 +251,11 @@ outside this study's protocol.
 - **Perturbation code (not used by any condition yet):** `perturb_disconnected_electrode` has a `floating` mode (lead
   came off: 50 Hz pickup + slow drift + noise, levels as parameters), and a catalog entry can reuse another group's
   random electrodes (`electrode_group`).
+
+### 2026-11-14 · floating electrode
+- **Why:** a flat electrode barely changes eventNet's input. Under the common average it becomes minus the average, not
+  a flat line (error/signal RMS 0.41 at 5 flat electrodes, PN00-1). A flat line is a lead shorted to the reference; a
+  lead that comes off leaves an open input that picks up mains and drift.
+- **`floating_mild|moderate|severe`:** same electrodes (and nesting) as `disconnected_*`, EEG
+  replaced by 50 Hz pickup 200 µV peak (same phase), drift 100 µV RMS (0.05–0.5 Hz), 10 µV RMS noise. Error/signal
+  in eventNet's input 2.17 at severe (PN00-1). Added to the core grid (12 conditions).

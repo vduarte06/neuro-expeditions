@@ -117,6 +117,7 @@ python plot_exam.py PN00-1 --perturb muscle_severe   # look at one condition on 
 | `mains` | 50 Hz sinusoid, peak amplitude, same phase on all affected electrodes | 3 random | 5 µV | 20 µV | 50 µV |
 | `impedance` | Gaussian noise, 0.5–70 Hz; SNR vs the electrode's own 0.5–70 Hz RMS (median over 10 s windows) | 2 random | SNR 10 dB | 5 dB | 0 dB |
 | `disconnected` | flat line (0.5 µV noise floor) | random, nested | 1 | 3 | 5 |
+| `floating` | disconnected lead left open: EEG replaced by 50 Hz pickup (200 µV peak, same phase) + slow drift (100 µV RMS, 0.05–0.5 Hz) + 10 µV RMS noise | same electrodes as `disconnected` | 1 | 3 | 5 |
 | `muscle` | 20–100 Hz noise in 2 s bursts (flat top, 0.2 s ramps) covering 10% of the recording, same timing on all 6 electrodes | F7, F8, T7, T8, P7, P8 (old names F7, F8, T3–T6) | 20 µV RMS | 50 µV RMS | 100 µV RMS |
 | `displacement` | `x ← (1−α)·x + α·neighbour` (nearest 10-20 neighbour) | 2 random | α 0.25 | α 0.50 | α 0.75 |
 

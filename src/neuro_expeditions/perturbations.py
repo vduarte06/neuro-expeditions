@@ -3,7 +3,7 @@
 Implements realistic electrode-level technical errors applied to referential (unipolar)
 raw EEG prior to downstream detector preprocessing and re-referencing.
 
-VARIATIONS_CATALOG is the benchmark grid: 5 error types x 3 severities (mild / moderate / severe). CORE_VARIATIONS
+VARIATIONS_CATALOG is the benchmark grid: 6 error types x 3 severities (mild / moderate / severe). CORE_VARIATIONS
 (the default of the core runs) keeps mild and severe only.
 
     Error          Simulation                                Electrodes                  Mild     Moderate  Severe
@@ -13,6 +13,10 @@ VARIATIONS_CATALOG is the benchmark grid: 5 error types x 3 severities (mild / m
                    SNR vs the electrode's own 0.5-70 Hz RMS
                    (median of 10 s windows)
     disconnected   flat line (0.5 µV noise floor)            1 / 3 / 5 random (nested)
+    floating       disconnected, lead left open: no EEG;     same electrodes as disconnected
+                   50 Hz pickup 200 µV peak (same phase)
+                   + slow drift 100 µV RMS (< ~0.5 Hz)
+                   + 10 µV RMS broadband noise
     muscle         20-100 Hz noise in 2 s bursts covering    F7, F8, T7, T8, P7, P8      20 µV    50 µV     100 µV RMS
                    10% of the recording, same burst timing   (old names F7, F8, T3-T6)
                    on all 6 electrodes, flat top + 0.2 s
@@ -22,6 +26,9 @@ VARIATIONS_CATALOG is the benchmark grid: 5 error types x 3 severities (mild / m
 Random electrodes are drawn per recording, seeded from the recording name and the error type, so a recording always
 gets the same electrodes, the three severities of one error type share them (and the 1 / 3 / 5 disconnected
 electrodes are nested), and the noise realization is shared too: only the intensity changes between severities.
+floating_* reuses the electrodes of disconnected_* (electrode_group), so flat and floating differ only in the signal.
+Flat = lead shorted to the reference; floating = lead come off, open input picking up mains and drift. A flat lead
+barely changes a common-average input (it becomes minus the average), a floating one leaks into every channel.
 variation_electrodes() returns the electrodes a variation uses for a recording.
 
 FOCUS_VARIATIONS disconnects (flat line) temporal electrodes chosen by the patient's seizure side (Siena
@@ -490,6 +497,11 @@ VARIATIONS_CATALOG: dict[str, dict[str, Any]] = {
     **_grid("disconnected", "disconnected", {"mild": 1, "moderate": 3, "severe": 5},
             {s: {"mode": "flat"} for s in ("mild", "moderate", "severe")},
             "Disconnected electrode: flat line on {n} random electrode(s)"),
+    **{k: {**v, "electrode_group": "disconnected"} for k, v in _grid(
+        "floating", "disconnected", {"mild": 1, "moderate": 3, "severe": 5},
+        {s: {"mode": "floating", "mains_uV": 200.0, "drift_uV": 100.0, "noise_uV": 10.0} for s in ("mild", "moderate", "severe")},
+        "Floating electrode (came off, open input): 50 Hz 200 µV + drift 100 µV RMS + noise on {n} random "
+        "electrode(s), same ones as disconnected").items()},
     **_grid("muscle", "muscle_bursts", None,
             {s: {"rms_uV": r, "channels": MUSCLE_ELECTRODES} for s, r in [("mild", 20.0), ("moderate", 50.0), ("severe", 100.0)]},
             "Muscle: 20-100 Hz bursts ({rms_uV:g} µV RMS, 2 s, 10% of the time, synchronous) on F7, F8, T7, T8, P7, P8"),

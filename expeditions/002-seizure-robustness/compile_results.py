@@ -28,7 +28,7 @@ import pandas as pd
 from scipy.stats import binomtest, wilcoxon
 
 HERE = Path(__file__).parent
-CORE = [f"{e}_{lvl}" for e in ["mains", "impedance", "disconnected", "muscle", "displacement"] for lvl in ["mild", "severe"]]
+CORE = [f"{e}_{lvl}" for e in ["mains", "impedance", "disconnected", "floating", "muscle", "displacement"] for lvl in ["mild", "severe"]]
 SIDE = [f"side_{s}_{e}" for e in ["flat", "impedance60uV", "displace50pct"] for s in ["ipsi", "contra"]]
 DETECTOR_NAMES = {"eventnet": "eventNet", "dinoeeg": "DINO-EEG", "sparcnet": "SPaRCNet", "gotman": "Gotman"}
 
