@@ -146,12 +146,19 @@ def perturb_high_impedance(
 
 def perturb_disconnected_electrode(
     raw: mne.io.Raw,
-    mode: str = "flat",  # 'flat', 'drift', 'saturation'
+    mode: str = "flat",  # 'flat', 'floating', 'drift', 'saturation'
     channels: str | list[str] = "F3",
     seed: int = 42,
+    mains_uV: float = 200.0,
+    drift_uV: float = 100.0,
+    noise_uV: float = 10.0,
     **kwargs,
 ) -> mne.io.Raw:
-    """Simulate a loose, fallen, or detached electrode."""
+    """Simulate a loose, fallen, or detached electrode.
+
+    'floating' (lead came off, open input): the EEG is replaced by 50 Hz pickup of `mains_uV` peak (same phase on every
+    lead, one source) + slow drift of `drift_uV` RMS (0.05-0.5 Hz) + `noise_uV` RMS broadband noise.
+    """
     raw_mod = raw.copy()
     target_chs = _resolve_target_channels(raw_mod, channels)
     if not target_chs:
@@ -174,6 +181,15 @@ def perturb_disconnected_electrode(
             b, a = signal.butter(1, 0.05 / (sfreq / 2), btype="high")
             drift = signal.filtfilt(b, a, walk) * 10
             data[i] = drift
+        elif mode == "floating":
+            # Open input: mains pickup (one source -> same phase on every floating lead), slow drift, broadband noise
+            if i == 0:
+                phase = rng.uniform(0, 2 * np.pi)
+            mains = mains_uV * 1e-6 * np.sin(2 * np.pi * 50.0 * times + phase)
+            sos = signal.butter(2, [0.05, 0.5], btype="band", fs=sfreq, output="sos")
+            drift = signal.sosfiltfilt(sos, np.cumsum(rng.normal(size=n_times)))
+            drift *= drift_uV * 1e-6 / max(drift.std(), 1e-30)
+            data[i] = mains + drift + rng.normal(0, noise_uV * 1e-6, size=n_times)
         elif mode == "saturation":
             # Floating lead picking up massive 50 Hz mains hum and clipping
             mains = 800e-6 * np.sin(2 * np.pi * 50.0 * times + rng.uniform(0, 2 * np.pi))
@@ -678,7 +694,8 @@ def variation_electrodes(
     pool = sorted(ch_names)  # sorted, so the draw does not depend on the channel order
     if spec["func"] == "displacement_multi":
         pool = [c for c in pool if NEIGHBORS_10_20.get(c) in ch_names]
-    rng = np.random.default_rng(_stable_seed(recording, spec["group"], "electrodes"))
+    group = spec.get("electrode_group", spec["group"])  # a variation can reuse another group's electrode draw
+    rng = np.random.default_rng(_stable_seed(recording, group, "electrodes"))
     order = rng.permutation(len(pool))
     return [pool[i] for i in order[:n]]  # same permutation for every severity -> nested selections
 

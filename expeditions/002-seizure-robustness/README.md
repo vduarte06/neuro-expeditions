@@ -118,6 +118,15 @@ python run_perturbations.py --detectors gotman,sparcnet               # same con
 python run_perturbations.py --patients PN00 --variations disconnected_mild,disconnected_focus_severe
 python plot_exam.py PN00-1 --perturb disconnected_focus_severe --compare   # perturbed signal over clean (grey)
 python preprocessing_survival.py                                      # how much of each error reaches each model
+python run_perturbations.py --detectors all --estimate                # what would run + expected duration, runs nothing
+
+# Batches: several run_perturbations.py stages in a row, in the background, each batch in its own folder
+# (results/perturbations/batches/<date>_<name>/: tables, predictions, run records, logs). Stages: top of run_batch.sh
+./run_batch.sh estimate      # expected duration per stage
+./run_batch.sh start         # launch (Mac kept awake; safe to close the terminal)
+./run_batch.sh status        # current stage, latest progress / ETA
+./run_batch.sh watch         # follow live (Ctrl+C stops watching only)
+./run_batch.sh stop          # stop; cached predictions kept, the next start reuses them
 ```
 Results: `results/clean/` (`metrics_overall.csv`, `metrics_by_patient.csv`, `metrics_by_recording.csv`).
 
@@ -221,3 +230,23 @@ outside this study's protocol.
   technician's role, so detectors stay fixed tools, run as released (see Pipeline note). With a 50 Hz notch, a
   synthetic 50 µV peak 50 Hz error would leave 0.24 µV RMS after DINO-EEG preprocessing (−43 dB), i.e. the mains
   test would be trivial for it.
+
+### 2026-11-14 · run tooling: progress, ETA, batches
+- **Progress:** `run_perturbations.py` prints `[progress] runs | hours | elapsed | ETA` after each detector run and
+  has `--estimate` (plan + expected duration, runs nothing). Timing, PN00-1 (44 min): eventNet 9.5 s (8 s of it the
+  official SzCORE resampling), DINO-EEG 10 s, i.e. ~24 min per condition per detector on the 111 h cohort.
+- **Provenance:** every result row has a `run` column (`--run-label`, default the start time; older rows
+  `before_2026-11-14`), and each run writes `runs/<run>.json`: command, git commit, detectors, conditions, detector
+  runs computed vs reused from the cache (`computed_files` = the new ones), failures, start/end, status.
+- **Own folder per run:** `--out <folder>` writes the tables under `results/perturbations/<folder>/` instead of
+  merging into `<cohort>_patients/`, plus `predictions/`, a copy of every prediction the tables were scored from, so
+  the folder is complete on its own. The prediction cache stays shared (same detector x condition x recording = same
+  output), so nothing is recomputed.
+- **`run_batch.sh`:** runs stages in order in the background (caffeinate + nohup), one folder per batch
+  (`batches/<date>_<name>/`, logs included), stops at the first failing stage, macOS notification at the end;
+  `start | status | watch | stop | estimate`. Stages must not run in parallel: they would compute the same predictions
+  twice and share one GPU.
+- **DINO-EEG:** a failing pyprep step now warns instead of passing silently (behaviour otherwise unchanged).
+- **Perturbation code (not used by any condition yet):** `perturb_disconnected_electrode` has a `floating` mode (lead
+  came off: 50 Hz pickup + slow drift + noise, levels as parameters), and a catalog entry can reuse another group's
+  random electrodes (`electrode_group`).

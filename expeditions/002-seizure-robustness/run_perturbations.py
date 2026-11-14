@@ -10,23 +10,39 @@ Usage (assumes poetry shell inside expeditions/002-seizure-robustness):
     python run_perturbations.py --patients PN00 --detectors dinoeeg  # one patient -> custom_patients/
     python run_perturbations.py --recordings PN00-1 --variations disconnected_mild   # one file -> custom_patients/
     python run_perturbations.py --list
+    python run_perturbations.py --detectors all --estimate   # plan + expected duration, runs nothing
+
+Progress: after every detector run a line `[progress] jobs done/total | hours | elapsed | ETA` is printed. The ETA
+uses each detector's measured seconds per recording-hour (a prior from 2026-11-14 timings until the first run of
+that detector finishes), times the recording-hours still to do. Cached results count as done and cost nothing.
 
 Each recording is perturbed once and every selected detector runs on the same perturbed signal. A detector is
 compared with its own clean predictions (the evaluate_detectors.py cache, clean/<detector>/), on the same recordings.
 Perturbed predictions are cached in data/cache/002-seizure-robustness/perturbations/<detector>/<condition>/.
 A detector failing on a recording is logged to <results>/errors.log and that recording is left out of its numbers.
 
-Outputs (results/perturbations/<cohort>_patients/), one row per detector x condition (x recording), with a `detector`
-column. Cohort runs merge into the existing files (rows of the same detector and condition are replaced), so models
+Outputs (results/perturbations/<cohort>_patients/, or results/perturbations/<--out>/), one row per detector x condition
+(x recording), with a `detector` column. --out gives a run its own folder (run_batch.sh does this per batch), so its
+tables hold only what it ran and never mix with older results; runs sharing an --out merge like cohort runs. With
+--out the folder also gets predictions/<detector>/<condition>/<recording>.tsv: a copy of every prediction the tables
+were scored from (computed now or reused from the cache), so the folder is complete on its own and can be copied
+elsewhere; runs/<run>.json lists under computed_files the ones this run computed (new in the cache). Cohort runs merge into the existing files (rows of the same detector and condition are replaced), so models
 run separately end up side by side; custom_patients/ is overwritten on every run.
     summary_by_variation.csv   recall, precision, f1, fa_per_24h, deltas vs clean
     metrics_by_recording.csv   per recording: hours, n_seizures, tp, fp, perturbed electrodes
+    runs/<run>.json            what this run did: command, git commit, detectors, conditions, how many detector runs
+                               were computed vs reused from the cache, failures, start/end, status
+Every row has a `run` column (--run-label, default the start time, e.g. 2026-11-14_0736), so the rows a run wrote can
+be found; rows written before 2026-11-14 are labelled "before_2026-11-14".
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
+import json
+import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -64,6 +80,56 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results" / "perturbations"
 # replaces an earlier list of 9 chosen from eventNet's first baseline (without PN03, PN06), which favoured eventNet.
 # Used by run_extended_tests.py, audit_event_masking.py and preprocessing_survival.py too.
 INCLUDED_PATIENTS = ["PN00", "PN01", "PN03", "PN05", "PN06", "PN09", "PN12", "PN13", "PN14", "PN16", "PN17"]
+
+# Seconds of compute per hour of recording, per detector (incl. loading + perturbing), for the ETA before the first
+# measurement. Measured 2026-11-14 on PN00-1 (44 min, Apple MPS): eventNet 9.5 s (8 s of it the SzCORE resampling),
+# DINO-EEG 10 s; Gotman / SPaRCNet from the 2026-11-08 README check (4 s / 1 s). Replaced live by measured rates.
+PRIOR_SEC_PER_HOUR = {"eventnet": 13.0, "dinoeeg": 14.0, "dinoeeg_norej": 14.0, "gotman": 6.0, "sparcnet": 2.0}
+
+
+class Progress:
+    """Counts detector runs still to do (weighted by recording hours) and prints an ETA."""
+
+    def __init__(self, jobs: list[tuple[str, float]]):
+        self.total_jobs, self.done_jobs = len(jobs), 0
+        self.left_hours = {}
+        for det, hours in jobs:
+            self.left_hours[det] = self.left_hours.get(det, 0.0) + hours
+        self.total_hours = sum(self.left_hours.values())
+        self.spent = {d: 0.0 for d in self.left_hours}  # measured seconds
+        self.measured_hours = {d: 0.0 for d in self.left_hours}
+        self.t0 = time.time()
+
+    def rate(self, det: str) -> float:
+        if self.measured_hours.get(det, 0) > 0.5:  # enough to trust the measurement
+            return self.spent[det] / self.measured_hours[det]
+        return PRIOR_SEC_PER_HOUR.get(det, 15.0)
+
+    def eta_seconds(self) -> float:
+        return sum(h * self.rate(d) for d, h in self.left_hours.items())
+
+    def summary(self) -> str:
+        lines = [f"  {d:<14} {h:7.1f} h of recordings to run, ~{fmt_duration(h * self.rate(d))}"
+                 for d, h in self.left_hours.items()]
+        return "\n".join(lines + [f"  {'total':<14} {self.total_jobs} detector runs, "
+                                   f"~{fmt_duration(self.eta_seconds())}"])
+
+    def update(self, det: str, hours: float, seconds: float) -> None:
+        self.done_jobs += 1
+        self.left_hours[det] = max(0.0, self.left_hours[det] - hours)
+        self.spent[det] += seconds
+        self.measured_hours[det] += hours
+        eta = self.eta_seconds()
+        done_h = self.total_hours - sum(self.left_hours.values())
+        finish = time.strftime("%a %H:%M", time.localtime(time.time() + eta))
+        print(f"     [progress] {self.done_jobs}/{self.total_jobs} runs | {done_h:.0f}/{self.total_hours:.0f} h | "
+              f"elapsed {fmt_duration(time.time() - self.t0)} | ETA {fmt_duration(eta)} (~{finish})", flush=True)
+
+
+def fmt_duration(seconds: float) -> str:
+    m = int(round(seconds / 60))
+    return f"{m // 60}h{m % 60:02d}m" if m >= 60 else f"{m}m"
+
 
 SZCORE_PARAMS = scoring.EventScoring.Parameters(
     toleranceStart=30,
@@ -132,6 +198,8 @@ def save_merged(df: pd.DataFrame, path: Path, merge: bool) -> None:
         if set(keys) <= set(old.columns):  # files from before the detector column are replaced
             new = set(map(tuple, df[keys].astype(str).values))
             old = old[[tuple(k) not in new for k in old[keys].astype(str).values]]
+            if "run" not in old.columns:
+                old["run"] = "before_2026-11-14"
             df = pd.concat([old, df], ignore_index=True)
     df.round(4).to_csv(path, index=False)
 
@@ -155,8 +223,8 @@ def main() -> None:
     parser.add_argument(
         "--variations",
         default="",
-        help="Comma-separated list of variations to evaluate (default: CORE_VARIATIONS, the 10 core conditions, 5 "
-             "error types x mild/severe; the moderate levels, the 4 disconnected focus/contra variations and the "
+        help="Comma-separated list of variations to evaluate (default: CORE_VARIATIONS, the core conditions, every "
+             "error type x mild/severe; the moderate levels, the 4 disconnected focus/contra variations and the "
              "extra variations can be named here).",
     )
     parser.add_argument(
@@ -174,6 +242,21 @@ def main() -> None:
         "--list", "-l",
         action="store_true",
         help="List available variations and exit.",
+    )
+    parser.add_argument(
+        "--out",
+        default="",
+        help="Results folder under results/perturbations/ (e.g. batches/2026-11-14_0800). Default: <cohort>_patients/.",
+    )
+    parser.add_argument(
+        "--run-label",
+        default=time.strftime("%Y-%m-%d_%H%M"),
+        help="Label written in the `run` column of every row and as runs/<label>.json. Default: start time.",
+    )
+    parser.add_argument(
+        "--estimate",
+        action="store_true",
+        help="Print what would run (detector runs not cached yet) and the expected duration, then exit.",
     )
     parser.add_argument(
         "--force",
@@ -218,6 +301,8 @@ def main() -> None:
         if missing:
             parser.error(f"recording(s) not found: {', '.join(sorted(missing))}")
         results_dir = RESULTS_DIR / "custom_patients"
+    if args.out:
+        results_dir = RESULTS_DIR / args.out
     merge = results_dir.name != "custom_patients"
 
     print("=" * 80)
@@ -237,11 +322,60 @@ def main() -> None:
     print(f"Total dataset: {sum(durations.values()) / 3600:.2f} hours, "
           f"{sum(len(s) for s in ground_truths.values())} true seizures across {len(recordings)} files.\n")
 
+    # Plan: every (detector, recording) run not cached yet, clean baselines first
+    jobs: list[tuple[str, float]] = []
+    for edf in recordings:
+        jobs += [(d, durations[edf.stem] / 3600) for d in detectors
+                 if not (CLEAN_CACHE_DIR / d / f"{edf.stem}.tsv").is_file()]
+    for var_name in target_variations:
+        for edf in recordings:
+            if variation_electrodes(var_name, edf.stem, ELECTRODES):
+                jobs += [(d, durations[edf.stem] / 3600) for d in detectors
+                         if args.force or not (CACHE_DIR / d / var_name / f"{edf.stem}.tsv").is_file()]
+    progress = Progress(jobs)
+    print("To run (cached results are reused):")
+    print(progress.summary() if jobs else "  nothing, everything is cached", flush=True)
+    print()
+    if args.estimate:
+        return
+
+    run = args.run_label
+    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    dirty = bool(subprocess.run(["git", "status", "--porcelain", "--", str(PROJECT_ROOT / "src"), "."],
+                                capture_output=True, text=True, cwd=Path(__file__).parent).stdout.strip())
+    manifest = {
+        "run": run, "status": "running", "started": time.strftime("%Y-%m-%d %H:%M:%S"), "finished": None,
+        "command": "python " + " ".join(sys.argv), "git_commit": commit + ("+uncommitted changes" if dirty else ""),
+        "detectors": detectors, "conditions": target_variations, "recordings": [r.stem for r in recordings],
+        "expected_duration": fmt_duration(progress.eta_seconds()),
+        "computed": {}, "reused_from_cache": {}, "failed": {},  # per detector: number of (recording, condition) runs
+        "computed_files": [],  # cache paths (relative to the cache root) this run wrote
+    }
+    manifest_path = results_dir / "runs" / f"{run}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_manifest() -> None:
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    def count(kind: str, detector: str) -> None:
+        manifest[kind][detector] = manifest[kind].get(detector, 0) + 1
+
+    def keep(src: Path, detector: str, condition: str) -> None:
+        """With --out, copy a prediction the tables use into <results>/predictions/ (folder complete on its own)."""
+        if args.out:
+            dst = results_dir / "predictions" / detector / condition / src.name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+    write_manifest()
+    print(f"Run label: {run}  (rows get run={run}; record: {manifest_path.relative_to(Path(__file__).parent)})\n")
+
     loaded: dict = {}
 
     def predict(detector: str, raw, dest: Path, label: str) -> None:
         """Run a detector on raw and cache its events at dest; failures are logged and leave no cache file."""
         t0 = time.time()
+        hours = raw.n_times / raw.info["sfreq"] / 3600
         try:
             if detector not in loaded:
                 print(f"     Loading {detector}...", flush=True)
@@ -252,10 +386,15 @@ def main() -> None:
             with open(errors_log, "a") as f:
                 f.write(f"--- {detector} {label} {time.strftime('%Y-%m-%d %H:%M')}\n{traceback.format_exc()}\n")
             print(f"     {label} [{detector}] FAILED (see {errors_log.name})", flush=True)
+            count("failed", detector)
+            progress.update(detector, hours, time.time() - t0)
             return
         dest.parent.mkdir(parents=True, exist_ok=True)
         events.to_csv(dest, sep="\t", index=False)
         print(f"     {label} [{detector}] {len(events)} event(s) in {time.time() - t0:.0f}s", flush=True)
+        count("computed", detector)
+        manifest["computed_files"].append(str(dest.relative_to(CACHE_DIR.parent)))
+        progress.update(detector, hours, time.time() - t0)
 
     def score_row(detector: str, condition: str, edf: Path, events: pd.DataFrame, electrodes: str = "") -> dict:
         dur = durations[edf.stem]
@@ -270,6 +409,7 @@ def main() -> None:
             "tp": tp,
             "fp": fp,
             "electrodes": electrodes,
+            "run": run,
         }
 
     summary_records: list[dict] = []
@@ -285,6 +425,8 @@ def main() -> None:
     for edf in recordings:
         dests = {d: CLEAN_CACHE_DIR / d / f"{edf.stem}.tsv" for d in detectors}
         pending = [d for d in detectors if not dests[d].is_file()]
+        for d in set(detectors) - set(pending):
+            count("reused_from_cache", d)
         if pending:
             raw = siena.load_raw(edf, attach_annotations=False)
             for d in pending:
@@ -294,11 +436,12 @@ def main() -> None:
         for d in detectors:
             if dests[d].is_file():
                 clean_rows[d].append(score_row(d, "clean", edf, read_events(dests[d])))
+                keep(dests[d], d, "clean")
 
     for d in detectors:
         m = aggregate(clean_rows[d])
         summary_records.append({"detector": d, "condition": "clean", "description": "Clean unperturbed baseline",
-                                **m, "delta_recall": 0.0, "delta_f1": 0.0, "delta_fa_24h": 0.0})
+                                **m, "delta_recall": 0.0, "delta_f1": 0.0, "delta_fa_24h": 0.0, "run": run})
         recording_rows.extend(clean_rows[d])
         print(f"  [{d:<8}] Recall={m['recall']:.1%} ({m['tp']}/{m['total_seizures']}), "
               f"Precision={m['precision']:.1%}, F1={m['f1']:.3f}, FA/24h={m['fa_per_24h']:.1f}")
@@ -319,6 +462,8 @@ def main() -> None:
                 continue
             dests = {d: CACHE_DIR / d / var_name / f"{edf.stem}.tsv" for d in detectors}
             pending = [d for d in detectors if args.force or not dests[d].is_file()]
+            for d in set(detectors) - set(pending):
+                count("reused_from_cache", d)
             if pending:
                 raw = siena.load_raw(edf, attach_annotations=False)
                 perturbed = apply_variation(raw, var_name)  # upstream, in the referential montage
@@ -329,6 +474,7 @@ def main() -> None:
             for d in detectors:
                 if dests[d].is_file() and edf.stem in clean_stems[d]:
                     var_rows[d].append(score_row(d, var_name, edf, read_events(dests[d]), " ".join(electrodes)))
+                    keep(dests[d], d, var_name)
 
         for d in detectors:
             rows = var_rows[d]
@@ -346,6 +492,7 @@ def main() -> None:
                 "delta_recall": m["recall"] - base["recall"],
                 "delta_f1": m["f1"] - base["f1"],
                 "delta_fa_24h": m["fa_per_24h"] - base["fa_per_24h"],
+                "run": run,
             }
             summary_records.append(rec)
             recording_rows.extend(rows)
@@ -355,9 +502,12 @@ def main() -> None:
                   f"FA/24h: {m['fa_per_24h']:.1f} (Δ {rec['delta_fa_24h']:+.1f}){note}", flush=True)
         print(f"     [{time.time() - t0:.1f}s]\n", flush=True)
         save()
+        write_manifest()
 
     # 3. Final summary
     save()
+    manifest.update(status="finished", finished=time.strftime("%Y-%m-%d %H:%M:%S"))
+    write_manifest()
     summary_df = pd.DataFrame(summary_records).round(4)
     print("=" * 80)
     print(" ALL PERTURBATIONS COMPLETE — Summary Benchmark Table")

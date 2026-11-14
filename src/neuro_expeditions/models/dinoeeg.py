@@ -12,7 +12,8 @@ Input: the referential 19-channel mne.Raw (volts), as the official `run_edf_to_t
 that signals can be perturbed first. No SzCORE conversion: the official pipeline has none, and its common average
 would add a re-referencing step before pyprep's bad-channel detection. Then the official preprocessing: 200 Hz, 60 Hz notch, 0.1-70 Hz band-pass, bad-channel detection + interpolation (pyprep),
 TCP bipolar montage, STFT (1 s window), per-time-step normalisation. The 60 Hz notch is the released setting
-(TUSZ is US data), kept as is.
+(TUSZ is US data), kept as is. detect_bad_channels=False skips the pyprep step (detection + interpolation), so a
+perturbed electrode reaches the model as it is.
 
 Long recordings are run in overlapping 1 h chunks (CHUNK_SEC / CHUNK_OVERLAP_SEC), events merged across chunks. The
 official script feeds each channel's whole recording to the model as one spectrogram image, which needs ~30 GB
@@ -25,6 +26,7 @@ import importlib.util
 import sys
 import tempfile
 import types
+import warnings
 from pathlib import Path
 
 import mne
@@ -83,8 +85,8 @@ def preprocess(raw: mne.io.Raw, r=None, detect_bad_channels: bool = True) -> tup
             raw.info["bads"] = bads
             if bads:
                 raw.interpolate_bads(verbose="error")
-        except Exception:
-            pass
+        except Exception as e:  # official behaviour: carry on without interpolation; but say so
+            warnings.warn(f"DINO-EEG pyprep bad-channel step failed, no interpolation: {e!r}")
     return r.rereference(raw), bads
 
 
